@@ -11,7 +11,7 @@ use profont::{PROFONT_12_POINT, PROFONT_14_POINT, PROFONT_18_POINT, PROFONT_24_P
 use crate::config::{Global, Kind, Page};
 use crate::docker::DockerStatus;
 use crate::frame::Frame;
-use crate::netif::Iface;
+use crate::netif::{self, Iface};
 use crate::services::{self, Filter, Unit};
 use crate::stats::Snapshot;
 
@@ -135,7 +135,7 @@ enum Item<'a> {
     },
     Network {
         title: String,
-        ifaces: &'a [Iface],
+        ifaces: Vec<Iface>,
     },
     Status,
 }
@@ -415,9 +415,15 @@ fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a
             }
             Kind::Network => {
                 if let Some(i) = &s.interfaces {
+                    let sel = netif::Select {
+                        names: w.interfaces.as_deref(),
+                        ipv4: w.ipv4.unwrap_or(true),
+                        ipv6: w.ipv6.unwrap_or(true),
+                        loopback: w.loopback.unwrap_or(false),
+                    };
                     items.push(Item::Network {
                         title: label("NETWORK"),
-                        ifaces: i,
+                        ifaces: netif::select(i, &sel),
                     });
                 }
             }
@@ -831,7 +837,7 @@ mod tests {
                 aux_label: "BLT",
                 vram: None,
             }],
-            interfaces: Some(crate::netif::list(true)),
+            interfaces: Some(crate::netif::list()),
             services: Some(crate::services::ServiceList {
                 error: None,
                 units: (0..40)

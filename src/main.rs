@@ -220,11 +220,7 @@ fn needs_for(cfg: &Config, idx: usize) -> stats::Needs {
     let on_page = |f: fn(Kind) -> bool| cfg.pages[idx].widgets.iter().any(|w| f(w.kind));
     n.docker = on_page(|k| matches!(k, Kind::DockerStatus | Kind::DockerStacks));
     n.services = on_page(|k| k == Kind::Services);
-    n.interfaces = cfg.pages[idx]
-        .widgets
-        .iter()
-        .find(|w| w.kind == Kind::Network)
-        .map(|w| w.loopback.unwrap_or(false));
+    n.interfaces = on_page(|k| k == Kind::Network);
     n
 }
 

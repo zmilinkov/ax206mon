@@ -72,8 +72,7 @@ pub struct Needs {
     pub gpu: bool,
     pub docker: bool,
     pub services: bool,
-    /// None = no network widget; Some(include_loopback) otherwise.
-    pub interfaces: Option<bool>,
+    pub interfaces: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -150,7 +149,7 @@ impl Collector {
                 .docker
                 .then(|| docker::query(&self.opts.docker_socket)),
             services: needs.services.then(services::query),
-            interfaces: needs.interfaces.map(netif::list),
+            interfaces: needs.interfaces.then(netif::list),
             temp_c: self.temp_file.as_deref().and_then(read_millideg),
             load1: loadavg().unwrap_or(0.0),
             uptime_s: uptime().unwrap_or(0),
