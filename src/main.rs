@@ -3,6 +3,7 @@ mod config;
 mod docker;
 mod frame;
 mod gpu;
+mod netif;
 mod render;
 mod services;
 mod stats;
@@ -198,7 +199,7 @@ fn stats_opts(cfg: &Config) -> stats::Options {
 
 /// Data sources needed while page `idx` is showing. Filesystems and GPU
 /// counters are collected for every page (GPU load is a delta that must not
-/// span a page's absence); the docker API and systemctl are only queried on their own pages.
+/// span a page's absence); the docker API, systemctl and interface list are only queried on their own pages.
 fn needs_for(cfg: &Config, idx: usize) -> stats::Needs {
     use config::Kind;
     let mut n = stats::Needs::default();
@@ -219,6 +220,11 @@ fn needs_for(cfg: &Config, idx: usize) -> stats::Needs {
     let on_page = |f: fn(Kind) -> bool| cfg.pages[idx].widgets.iter().any(|w| f(w.kind));
     n.docker = on_page(|k| matches!(k, Kind::DockerStatus | Kind::DockerStacks));
     n.services = on_page(|k| k == Kind::Services);
+    n.interfaces = cfg.pages[idx]
+        .widgets
+        .iter()
+        .find(|w| w.kind == Kind::Network)
+        .map(|w| w.loopback.unwrap_or(false));
     n
 }
 

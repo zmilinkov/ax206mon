@@ -72,6 +72,8 @@ pub enum Kind {
     Gpu,
     /// systemd services, named as `systemctl list-units -t service` shows them.
     Services,
+    /// Interfaces that have an IPv4 or IPv6 address.
+    Network,
     /// Footer line: hostname, uptime, load, network rates.
     Status,
     /// Docker daemon reachability and container counts.
@@ -94,6 +96,8 @@ pub struct Widget {
     pub units: Option<Vec<String>>,
     /// `services` without `units`: "running" (default), "active", "failed" or "all".
     pub filter: Option<String>,
+    /// `network`: also list loopback interfaces (default false).
+    pub loopback: Option<bool>,
 }
 
 impl Widget {
@@ -105,6 +109,7 @@ impl Widget {
             card: None,
             units: None,
             filter: None,
+            loopback: None,
         }
     }
 }
@@ -121,6 +126,7 @@ impl<'de> Deserialize<'de> for Widget {
             card: Option<String>,
             units: Option<Vec<String>>,
             filter: Option<String>,
+            loopback: Option<bool>,
         }
         #[derive(Deserialize)]
         #[serde(untagged)]
@@ -136,13 +142,14 @@ impl<'de> Deserialize<'de> for Widget {
                 card: f.card,
                 units: f.units,
                 filter: f.filter,
+                loopback: f.loopback,
             }),
             Raw::Name(s) => {
                 let kind = Kind::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(&s))
                     .map_err(|_| {
                         D::Error::custom(format!(
                             "unknown widget {s:?} (cpu, ram, disk, temp, gpu, services, \
-                             status, docker_status, docker_stacks)"
+                             network, status, docker_status, docker_stacks)"
                         ))
                     })?;
                 Ok(Widget::new(kind))
@@ -185,6 +192,11 @@ impl Default for Config {
                     name: "Services".into(),
                     duration: None,
                     widgets: w(&[Services]),
+                },
+                Page {
+                    name: "Network".into(),
+                    duration: None,
+                    widgets: w(&[Network]),
                 },
                 Page {
                     name: "Compose".into(),

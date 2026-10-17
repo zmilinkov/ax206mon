@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use crate::docker::{self, DockerStatus};
 use crate::gpu::{self, GpuStat};
+use crate::netif::{self, Iface};
 use crate::services::{self, ServiceList};
 
 /// CPU time split since the previous snapshot, each 0..=100.
@@ -54,6 +55,8 @@ pub struct Snapshot {
     pub docker: Option<DockerStatus>,
     /// Only filled when the current page has a services widget.
     pub services: Option<ServiceList>,
+    /// Only filled when the current page has a network widget.
+    pub interfaces: Option<Vec<Iface>>,
     pub temp_c: Option<f32>,
     pub load1: f32,
     pub uptime_s: u64,
@@ -69,6 +72,8 @@ pub struct Needs {
     pub gpu: bool,
     pub docker: bool,
     pub services: bool,
+    /// None = no network widget; Some(include_loopback) otherwise.
+    pub interfaces: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -145,6 +150,7 @@ impl Collector {
                 .docker
                 .then(|| docker::query(&self.opts.docker_socket)),
             services: needs.services.then(services::query),
+            interfaces: needs.interfaces.map(netif::list),
             temp_c: self.temp_file.as_deref().and_then(read_millideg),
             load1: loadavg().unwrap_or(0.0),
             uptime_s: uptime().unwrap_or(0),

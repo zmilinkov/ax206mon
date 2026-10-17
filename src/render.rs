@@ -11,6 +11,7 @@ use profont::{PROFONT_12_POINT, PROFONT_14_POINT, PROFONT_18_POINT, PROFONT_24_P
 use crate::config::{Global, Kind, Page};
 use crate::docker::DockerStatus;
 use crate::frame::Frame;
+use crate::netif::Iface;
 use crate::services::{self, Filter, Unit};
 use crate::stats::Snapshot;
 
@@ -131,6 +132,10 @@ enum Item<'a> {
         title: String,
         error: Option<&'a str>,
         units: Vec<Unit>,
+    },
+    Network {
+        title: String,
+        ifaces: &'a [Iface],
     },
     Status,
 }
@@ -408,6 +413,14 @@ fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a
                     });
                 }
             }
+            Kind::Network => {
+                if let Some(i) = &s.interfaces {
+                    items.push(Item::Network {
+                        title: label("NETWORK"),
+                        ifaces: i,
+                    });
+                }
+            }
             Kind::Status => items.push(Item::Status),
             Kind::DockerStatus | Kind::DockerStacks => {
                 if let Some(d) = &s.docker {
@@ -570,6 +583,45 @@ fn draw_services(f: &mut Frame, (x, y, w, h): (i32, i32, i32, i32), title: &str,
     }
 }
 
+/// Interfaces with their addresses; whatever doesn't fit is dropped.
+fn draw_network(f: &mut Frame, (x, y, w, h): (i32, i32, i32, i32), title: &str, ifaces: &[Iface]) {
+    let big = &PROFONT_18_POINT;
+    let name_font = &PROFONT_14_POINT;
+    let addr_font = &PROFONT_12_POINT;
+    text(f, title, Point::new(x, y), big, DOCKER, Alignment::Left);
+    text(f, &ifaces.len().to_string(), Point::new(x + w, y), big, TEXT, Alignment::Right);
+    let mut ry = y + char_h(big) + 6;
+    let end = y + h;
+    if ifaces.is_empty() {
+        text(f, "no addresses", Point::new(x, ry), name_font, MUTED, Alignment::Left);
+        return;
+    }
+    let name_h = char_h(name_font) + 4;
+    let addr_h = char_h(addr_font) + 3;
+    for i in ifaces {
+        // Need the name row and at least one address, or stop.
+        if ry + name_h + addr_h > end {
+            break;
+        }
+        let color = if i.up { RAM } else { MUTED };
+        let _ = Rectangle::new(Point::new(x, ry + 4), Size::new(8, 8))
+            .into_styled(PrimitiveStyle::with_fill(color))
+            .draw(f);
+        text(f, &truncate(&i.name, 16), Point::new(x + 16, ry), name_font, TEXT, Alignment::Left);
+        text(f, if i.up { "up" } else { "down" }, Point::new(x + w, ry), name_font, color, Alignment::Right);
+        ry += name_h;
+        for a in &i.addrs {
+            if ry + addr_h > end {
+                break;
+            }
+            let max = ((w - 16) / char_w(addr_font)) as usize;
+            text(f, &truncate(&a.to_string(), max), Point::new(x + 16, ry), addr_font, MUTED, Alignment::Left);
+            ry += addr_h;
+        }
+        ry += 5;
+    }
+}
+
 fn draw_docker_stacks(f: &mut Frame, x: i32, y: i32, w: i32, h: i32, d: &DockerStatus) {
     let title = &PROFONT_18_POINT;
     let small = &PROFONT_14_POINT;
@@ -641,7 +693,7 @@ pub fn render_page(
         Item::DockerStatus(_) => DOCKER_STATUS_H,
         _ => 0,
     };
-    let is_flex = |i: &Item| matches!(i, Item::DockerStacks(_) | Item::Services { .. });
+    let is_flex = |i: &Item| matches!(i, Item::DockerStacks(_) | Item::Services { .. } | Item::Network { .. });
     let flex = body.iter().filter(|i| is_flex(i)).count() as i32;
     let fixed: i32 = body.iter().map(|i| natural(i)).sum();
     const MIN_FLEX: i32 = 60;
@@ -680,6 +732,10 @@ pub fn render_page(
             }
             Item::Services { title, error, units } => {
                 draw_services(&mut f, (margin, y, cw, flex_h), title, *error, units);
+                y += flex_h;
+            }
+            Item::Network { title, ifaces } => {
+                draw_network(&mut f, (margin, y, cw, flex_h), title, ifaces);
                 y += flex_h;
             }
             Item::Status => {}
@@ -775,6 +831,7 @@ mod tests {
                 aux_label: "BLT",
                 vram: None,
             }],
+            interfaces: Some(crate::netif::list(true)),
             services: Some(crate::services::ServiceList {
                 error: None,
                 units: (0..40)

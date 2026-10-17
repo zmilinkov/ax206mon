@@ -17,7 +17,9 @@ The display cycles through the pages defined in
 * **Page 2 (Services)** – systemd services named as `systemctl list-units -t
   service` shows them, with their state. Only as many as fit are shown; use
   `units = [...]` to choose which, or `filter` to pick running/active/failed/all.
-* **Page 3 (Compose)** – running docker compose stacks (`running/total`
+* **Page 3 (Network)** – interfaces that have an IPv4 or IPv6 address, with
+  link state (loopback hidden unless `loopback = true`).
+* **Page 4 (Compose)** – running docker compose stacks (`running/total`
   containers each). A `docker_status` widget (daemon state, container counts)
   is available too.
 
