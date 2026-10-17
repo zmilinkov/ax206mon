@@ -103,6 +103,8 @@ pub struct Widget {
     pub ipv4: Option<bool>,
     /// `network`: show IPv6 addresses (default true).
     pub ipv6: Option<bool>,
+    /// `network`: show each interface's MAC address under its IPs (default false).
+    pub mac: Option<bool>,
     /// `network` without `interfaces`: also list loopback (default false).
     pub loopback: Option<bool>,
 }
@@ -119,6 +121,7 @@ impl Widget {
             interfaces: None,
             ipv4: None,
             ipv6: None,
+            mac: None,
             loopback: None,
         }
     }
@@ -139,6 +142,7 @@ impl<'de> Deserialize<'de> for Widget {
             interfaces: Option<Vec<String>>,
             ipv4: Option<bool>,
             ipv6: Option<bool>,
+            mac: Option<bool>,
             loopback: Option<bool>,
         }
         #[derive(Deserialize)]
@@ -158,6 +162,7 @@ impl<'de> Deserialize<'de> for Widget {
                 interfaces: f.interfaces,
                 ipv4: f.ipv4,
                 ipv6: f.ipv6,
+                mac: f.mac,
                 loopback: f.loopback,
             }),
             Raw::Name(s) => {
@@ -355,7 +360,7 @@ mod tests {
         let c: Config = toml::from_str(
             r#"
             [[page]]
-            widgets = [{ type = "network", interfaces = ["eth0", "br-*"], ipv6 = false }]
+            widgets = [{ type = "network", interfaces = ["eth0", "br-*"], ipv6 = false, mac = true }]
             "#,
         )
         .unwrap();
@@ -363,6 +368,7 @@ mod tests {
         let w = &c.pages[0].widgets[0];
         assert_eq!(w.interfaces.as_deref().unwrap().len(), 2);
         assert_eq!(w.ipv6, Some(false));
+        assert_eq!(w.mac, Some(true));
         let bad: Config = toml::from_str(
             "[[page]]\nwidgets = [{ type = \"network\", ipv4 = false, ipv6 = false }]",
         )

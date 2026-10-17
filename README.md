@@ -19,7 +19,7 @@ The display cycles through the pages defined in
   `units = [...]` to choose which, or `filter` to pick running/active/failed/all.
 * **Page 3 (Network)** – interfaces that have an IPv4 or IPv6 address, with
   link state. Choose interfaces with `interfaces = [...]` (none = all) and
-  toggle `ipv4` / `ipv6`; loopback is hidden unless listed or `loopback = true`.
+  toggle `ipv4` / `ipv6`, and show the MAC with `mac = true`; loopback is hidden unless listed or `loopback = true`.
 * **Page 4 (Compose)** – running docker compose stacks (`running/total`
   containers each). A `docker_status` widget (daemon state, container counts)
   is available too.

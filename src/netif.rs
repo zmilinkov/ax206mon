@@ -8,6 +8,8 @@ pub struct Iface {
     pub name: String,
     /// IFF_RUNNING: link is up.
     pub up: bool,
+    /// Hardware address from sysfs; None for interfaces without one (lo, tun, ...).
+    pub mac: Option<String>,
     /// IPv4 first, then global IPv6, then link-local IPv6.
     pub addrs: Vec<IpAddr>,
 }
@@ -44,7 +46,24 @@ pub fn list() -> Vec<Iface> {
         found.push((name, up, ip));
     }
     unsafe { libc::freeifaddrs(head) };
-    group(found)
+    let mut v = group(found);
+    for i in &mut v {
+        i.mac = read_mac(&i.name);
+    }
+    v
+}
+
+fn read_mac(name: &str) -> Option<String> {
+    let m = std::fs::read_to_string(format!("/sys/class/net/{name}/address")).ok()?;
+    parse_mac(&m)
+}
+
+/// Accept a colon-separated hardware address, rejecting the all-zero
+/// placeholder that loopback and tunnels report.
+fn parse_mac(s: &str) -> Option<String> {
+    let m = s.trim().to_ascii_lowercase();
+    let ok = !m.is_empty() && m.split(':').all(|b| b.len() == 2 && b.bytes().all(|c| c.is_ascii_hexdigit()));
+    (ok && m.bytes().any(|c| c != b'0' && c != b':')).then_some(m)
 }
 
 fn group(found: Vec<(String, bool, IpAddr)>) -> Vec<Iface> {
@@ -53,6 +72,7 @@ fn group(found: Vec<(String, bool, IpAddr)>) -> Vec<Iface> {
         let e = map.entry(name.clone()).or_insert_with(|| Iface {
             name,
             up,
+            mac: None,
             addrs: Vec::new(),
         });
         e.addrs.push(ip);
@@ -178,6 +198,14 @@ mod tests {
         );
         let empty: Vec<String> = Vec::new();
         assert_eq!(select(&all, &sel(Some(&empty), true, true, false)).len(), 4);
+    }
+
+    #[test]
+    fn mac_parsing() {
+        assert_eq!(parse_mac("AA:bb:0c:12:34:56\n").as_deref(), Some("aa:bb:0c:12:34:56"));
+        assert_eq!(parse_mac("00:00:00:00:00:00\n"), None);
+        assert_eq!(parse_mac(""), None);
+        assert_eq!(parse_mac("not-a-mac"), None);
     }
 
     #[test]

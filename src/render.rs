@@ -136,6 +136,7 @@ enum Item<'a> {
     Network {
         title: String,
         ifaces: Vec<Iface>,
+        mac: bool,
     },
     Status,
 }
@@ -424,6 +425,7 @@ fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a
                     items.push(Item::Network {
                         title: label("NETWORK"),
                         ifaces: netif::select(i, &sel),
+                        mac: w.mac.unwrap_or(false),
                     });
                 }
             }
@@ -590,7 +592,7 @@ fn draw_services(f: &mut Frame, (x, y, w, h): (i32, i32, i32, i32), title: &str,
 }
 
 /// Interfaces with their addresses; whatever doesn't fit is dropped.
-fn draw_network(f: &mut Frame, (x, y, w, h): (i32, i32, i32, i32), title: &str, ifaces: &[Iface]) {
+fn draw_network(f: &mut Frame, (x, y, w, h): (i32, i32, i32, i32), title: &str, ifaces: &[Iface], mac: bool) {
     let big = &PROFONT_18_POINT;
     let name_font = &PROFONT_14_POINT;
     let addr_font = &PROFONT_12_POINT;
@@ -622,6 +624,10 @@ fn draw_network(f: &mut Frame, (x, y, w, h): (i32, i32, i32, i32), title: &str, 
             }
             let max = ((w - 16) / char_w(addr_font)) as usize;
             text(f, &truncate(&a.to_string(), max), Point::new(x + 16, ry), addr_font, MUTED, Alignment::Left);
+            ry += addr_h;
+        }
+        if let Some(m) = i.mac.as_ref().filter(|_| mac && ry + addr_h <= end) {
+            text(f, &format!("mac {m}"), Point::new(x + 16, ry), addr_font, DOCKER, Alignment::Left);
             ry += addr_h;
         }
         ry += 5;
@@ -740,8 +746,8 @@ pub fn render_page(
                 draw_services(&mut f, (margin, y, cw, flex_h), title, *error, units);
                 y += flex_h;
             }
-            Item::Network { title, ifaces } => {
-                draw_network(&mut f, (margin, y, cw, flex_h), title, ifaces);
+            Item::Network { title, ifaces, mac } => {
+                draw_network(&mut f, (margin, y, cw, flex_h), title, ifaces, *mac);
                 y += flex_h;
             }
             Item::Status => {}
