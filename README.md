@@ -37,7 +37,18 @@ Preview a page without hardware: `ax206mon preview --page 2 out.png`.
 
 ## Notes
 
-* Docker pages need access to the socket: `usermod -aG docker ax206mon`.
+* The compose page needs access to the Docker (or Podman) socket. Give the
+  service the socket's group with a drop-in, which survives package upgrades
+  (`sudo systemctl edit ax206mon`):
+
+  ```ini
+  [Service]
+  SupplementaryGroups=docker
+  ```
+
+  then `sudo systemctl restart ax206mon`. If it still fails, the page and
+  `journalctl -u ax206mon` show why. Access to the Docker socket is
+  effectively root-equivalent.
 * Intel GPU load reads the i915 perf PMU, which needs `CAP_PERFMON` (granted
   by the systemd unit) or `perf_event_paranoid <= 0` when run by hand. Arc GPUs
   on the newer `xe` driver are not supported yet.

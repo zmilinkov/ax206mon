@@ -71,7 +71,7 @@ fn explain(e: &anyhow::Error, socket: &str) -> String {
     let root = e.root_cause().to_string();
     let low = root.to_lowercase();
     if low.contains("permission denied") {
-        format!("permission denied on {socket}; add the service user to the docker group: usermod -aG docker ax206mon")
+        format!("permission denied on {socket}; give the service SupplementaryGroups=docker (see README)")
     } else if low.contains("no such file") || low.contains("connection refused") {
         format!("engine not running ({socket})")
     } else {
@@ -270,6 +270,6 @@ mod tests {
         let e = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
             .context("connecting");
         let m = explain(&e, "/var/run/docker.sock");
-        assert!(m.contains("docker group"), "{m}");
+        assert!(m.contains("SupplementaryGroups=docker"), "{m}");
     }
 }
