@@ -8,13 +8,14 @@ pub struct Iface {
     pub name: String,
     /// IFF_RUNNING: link is up.
     pub up: bool,
+    /// Hardware address from sysfs; None for interfaces without one (lo, tun, ...).
+    pub mac: Option<String>,
     /// IPv4 first, then global IPv6, then link-local IPv6.
     pub addrs: Vec<IpAddr>,
 }
 
-/// Interfaces with at least one address, sorted by name. Loopback is only
-/// included when `loopback` is true.
-pub fn list(loopback: bool) -> Vec<Iface> {
+/// All interfaces with at least one address (loopback included), sorted by name.
+pub fn list() -> Vec<Iface> {
     let mut found: Vec<(String, bool, IpAddr)> = Vec::new();
     let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
     if unsafe { libc::getifaddrs(&mut head) } != 0 {
@@ -45,18 +46,33 @@ pub fn list(loopback: bool) -> Vec<Iface> {
         found.push((name, up, ip));
     }
     unsafe { libc::freeifaddrs(head) };
-    group(found, loopback)
+    let mut v = group(found);
+    for i in &mut v {
+        i.mac = read_mac(&i.name);
+    }
+    v
 }
 
-fn group(found: Vec<(String, bool, IpAddr)>, loopback: bool) -> Vec<Iface> {
+fn read_mac(name: &str) -> Option<String> {
+    let m = std::fs::read_to_string(format!("/sys/class/net/{name}/address")).ok()?;
+    parse_mac(&m)
+}
+
+/// Accept a colon-separated hardware address, rejecting the all-zero
+/// placeholder that loopback and tunnels report.
+fn parse_mac(s: &str) -> Option<String> {
+    let m = s.trim().to_ascii_lowercase();
+    let ok = !m.is_empty() && m.split(':').all(|b| b.len() == 2 && b.bytes().all(|c| c.is_ascii_hexdigit()));
+    (ok && m.bytes().any(|c| c != b'0' && c != b':')).then_some(m)
+}
+
+fn group(found: Vec<(String, bool, IpAddr)>) -> Vec<Iface> {
     let mut map: BTreeMap<String, Iface> = BTreeMap::new();
     for (name, up, ip) in found {
-        if !loopback && ip.is_loopback() {
-            continue;
-        }
         let e = map.entry(name.clone()).or_insert_with(|| Iface {
             name,
             up,
+            mac: None,
             addrs: Vec::new(),
         });
         e.addrs.push(ip);
@@ -71,6 +87,52 @@ fn group(found: Vec<(String, bool, IpAddr)>, loopback: bool) -> Vec<Iface> {
         i.addrs.sort_by_key(|a| (rank(a), *a));
     }
     v
+}
+
+/// What a `network` widget shows.
+pub struct Select<'a> {
+    /// Names to show, in this order; a trailing `*` matches a prefix
+    /// ("br-*"). None or empty = every interface.
+    pub names: Option<&'a [String]>,
+    pub ipv4: bool,
+    pub ipv6: bool,
+    /// Include loopback when no names are given (a name list is explicit).
+    pub loopback: bool,
+}
+
+fn name_matches(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => pattern == name,
+    }
+}
+
+/// Apply the widget's address-family and interface filters. Interfaces left
+/// with no addresses are dropped.
+pub fn select(all: &[Iface], sel: &Select) -> Vec<Iface> {
+    let keep = |a: &IpAddr| if a.is_ipv4() { sel.ipv4 } else { sel.ipv6 };
+    let narrow = |i: &Iface| {
+        let addrs: Vec<IpAddr> = i.addrs.iter().copied().filter(keep).collect();
+        (!addrs.is_empty()).then(|| Iface { addrs, ..i.clone() })
+    };
+    match sel.names.filter(|n| !n.is_empty()) {
+        Some(names) => {
+            let mut out: Vec<Iface> = Vec::new();
+            for pat in names {
+                for i in all.iter().filter(|i| name_matches(pat, &i.name)) {
+                    if !out.iter().any(|o| o.name == i.name) {
+                        out.extend(narrow(i));
+                    }
+                }
+            }
+            out
+        }
+        None => all
+            .iter()
+            .filter(|i| sel.loopback || !i.addrs.iter().all(IpAddr::is_loopback))
+            .filter_map(narrow)
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -91,15 +153,63 @@ mod tests {
             ("eth0".into(), true, ip("192.168.1.5")),
             ("br0".into(), false, ip("10.0.0.1")),
         ];
-        let v = group(found.clone(), false);
+        let all = group(found);
+        assert_eq!(all.len(), 3);
+        let v = select(&all, &sel(None, true, true, false));
         assert_eq!(v.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["br0", "eth0"]);
         assert_eq!(v[1].addrs, [ip("192.168.1.5"), ip("2001:db8::5"), ip("fe80::1")]);
         assert!(!v[0].up);
-        assert_eq!(group(found, true).len(), 3);
+        assert_eq!(select(&all, &sel(None, true, true, true)).len(), 3);
+    }
+
+    fn sel(names: Option<&[String]>, ipv4: bool, ipv6: bool, loopback: bool) -> Select<'_> {
+        Select { names, ipv4, ipv6, loopback }
+    }
+
+    fn sample() -> Vec<Iface> {
+        group(vec![
+            ("eth0".into(), true, ip("192.168.1.5")),
+            ("eth0".into(), true, ip("2001:db8::5")),
+            ("br-abc".into(), true, ip("172.18.0.1")),
+            ("br-def".into(), true, ip("172.19.0.1")),
+            ("wg0".into(), true, ip("fd00::1")),
+            ("lo".into(), true, ip("127.0.0.1")),
+        ])
+    }
+
+    #[test]
+    fn address_family_filters_drop_empty_interfaces() {
+        let all = sample();
+        let v4 = select(&all, &sel(None, true, false, false));
+        assert_eq!(v4.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["br-abc", "br-def", "eth0"]);
+        assert_eq!(v4[2].addrs, [ip("192.168.1.5")]);
+        let v6 = select(&all, &sel(None, false, true, false));
+        assert_eq!(v6.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["eth0", "wg0"]);
+    }
+
+    #[test]
+    fn named_interfaces_keep_order_support_prefix_and_loopback() {
+        let all = sample();
+        let names: Vec<String> = ["wg0", "eth0", "br-*", "lo", "nope"].map(String::from).into();
+        let v = select(&all, &sel(Some(&names), true, true, false));
+        assert_eq!(
+            v.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
+            ["wg0", "eth0", "br-abc", "br-def", "lo"]
+        );
+        let empty: Vec<String> = Vec::new();
+        assert_eq!(select(&all, &sel(Some(&empty), true, true, false)).len(), 4);
+    }
+
+    #[test]
+    fn mac_parsing() {
+        assert_eq!(parse_mac("AA:bb:0c:12:34:56\n").as_deref(), Some("aa:bb:0c:12:34:56"));
+        assert_eq!(parse_mac("00:00:00:00:00:00\n"), None);
+        assert_eq!(parse_mac(""), None);
+        assert_eq!(parse_mac("not-a-mac"), None);
     }
 
     #[test]
     fn getifaddrs_works() {
-        let _ = list(true);
+        let _ = list();
     }
 }

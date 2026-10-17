@@ -96,7 +96,16 @@ pub struct Widget {
     pub units: Option<Vec<String>>,
     /// `services` without `units`: "running" (default), "active", "failed" or "all".
     pub filter: Option<String>,
-    /// `network`: also list loopback interfaces (default false).
+    /// `network`: interfaces to show, in this order (trailing `*` = prefix
+    /// match); none or empty = all.
+    pub interfaces: Option<Vec<String>>,
+    /// `network`: show IPv4 addresses (default true).
+    pub ipv4: Option<bool>,
+    /// `network`: show IPv6 addresses (default true).
+    pub ipv6: Option<bool>,
+    /// `network`: show each interface's MAC address under its IPs (default false).
+    pub mac: Option<bool>,
+    /// `network` without `interfaces`: also list loopback (default false).
     pub loopback: Option<bool>,
 }
 
@@ -109,6 +118,10 @@ impl Widget {
             card: None,
             units: None,
             filter: None,
+            interfaces: None,
+            ipv4: None,
+            ipv6: None,
+            mac: None,
             loopback: None,
         }
     }
@@ -126,6 +139,10 @@ impl<'de> Deserialize<'de> for Widget {
             card: Option<String>,
             units: Option<Vec<String>>,
             filter: Option<String>,
+            interfaces: Option<Vec<String>>,
+            ipv4: Option<bool>,
+            ipv6: Option<bool>,
+            mac: Option<bool>,
             loopback: Option<bool>,
         }
         #[derive(Deserialize)]
@@ -142,6 +159,10 @@ impl<'de> Deserialize<'de> for Widget {
                 card: f.card,
                 units: f.units,
                 filter: f.filter,
+                interfaces: f.interfaces,
+                ipv4: f.ipv4,
+                ipv6: f.ipv6,
+                mac: f.mac,
                 loopback: f.loopback,
             }),
             Raw::Name(s) => {
@@ -258,6 +279,9 @@ impl Config {
                 bail!("page {}: no widgets", i + 1);
             }
             for w in &p.widgets {
+                if w.kind == Kind::Network && !w.ipv4.unwrap_or(true) && !w.ipv6.unwrap_or(true) {
+                    bail!("page {}: network widget has ipv4 and ipv6 both disabled", i + 1);
+                }
                 if let Some(f) = &w.filter {
                     if crate::services::Filter::parse(f).is_none() {
                         bail!("page {}: filter must be running, active, failed or all (got {f:?})", i + 1);
@@ -329,6 +353,27 @@ mod tests {
         .unwrap();
         assert_eq!(c.pages[0].widgets[0], Widget::new(Kind::Cpu));
         assert_eq!(c.pages[0].widgets[1].path.as_deref(), Some("/data"));
+    }
+
+    #[test]
+    fn network_options_parse_and_validate() {
+        let c: Config = toml::from_str(
+            r#"
+            [[page]]
+            widgets = [{ type = "network", interfaces = ["eth0", "br-*"], ipv6 = false, mac = true }]
+            "#,
+        )
+        .unwrap();
+        c.validate().unwrap();
+        let w = &c.pages[0].widgets[0];
+        assert_eq!(w.interfaces.as_deref().unwrap().len(), 2);
+        assert_eq!(w.ipv6, Some(false));
+        assert_eq!(w.mac, Some(true));
+        let bad: Config = toml::from_str(
+            "[[page]]\nwidgets = [{ type = \"network\", ipv4 = false, ipv6 = false }]",
+        )
+        .unwrap();
+        assert!(bad.validate().is_err());
     }
 
     #[test]

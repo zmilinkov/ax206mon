@@ -11,7 +11,7 @@ use profont::{PROFONT_12_POINT, PROFONT_14_POINT, PROFONT_18_POINT, PROFONT_24_P
 use crate::config::{Global, Kind, Page};
 use crate::docker::DockerStatus;
 use crate::frame::Frame;
-use crate::netif::Iface;
+use crate::netif::{self, Iface};
 use crate::services::{self, Filter, Unit};
 use crate::stats::Snapshot;
 
@@ -135,7 +135,8 @@ enum Item<'a> {
     },
     Network {
         title: String,
-        ifaces: &'a [Iface],
+        ifaces: Vec<Iface>,
+        mac: bool,
     },
     Status,
 }
@@ -415,9 +416,16 @@ fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a
             }
             Kind::Network => {
                 if let Some(i) = &s.interfaces {
+                    let sel = netif::Select {
+                        names: w.interfaces.as_deref(),
+                        ipv4: w.ipv4.unwrap_or(true),
+                        ipv6: w.ipv6.unwrap_or(true),
+                        loopback: w.loopback.unwrap_or(false),
+                    };
                     items.push(Item::Network {
                         title: label("NETWORK"),
-                        ifaces: i,
+                        ifaces: netif::select(i, &sel),
+                        mac: w.mac.unwrap_or(false),
                     });
                 }
             }
@@ -584,7 +592,7 @@ fn draw_services(f: &mut Frame, (x, y, w, h): (i32, i32, i32, i32), title: &str,
 }
 
 /// Interfaces with their addresses; whatever doesn't fit is dropped.
-fn draw_network(f: &mut Frame, (x, y, w, h): (i32, i32, i32, i32), title: &str, ifaces: &[Iface]) {
+fn draw_network(f: &mut Frame, (x, y, w, h): (i32, i32, i32, i32), title: &str, ifaces: &[Iface], mac: bool) {
     let big = &PROFONT_18_POINT;
     let name_font = &PROFONT_14_POINT;
     let addr_font = &PROFONT_12_POINT;
@@ -616,6 +624,10 @@ fn draw_network(f: &mut Frame, (x, y, w, h): (i32, i32, i32, i32), title: &str, 
             }
             let max = ((w - 16) / char_w(addr_font)) as usize;
             text(f, &truncate(&a.to_string(), max), Point::new(x + 16, ry), addr_font, MUTED, Alignment::Left);
+            ry += addr_h;
+        }
+        if let Some(m) = i.mac.as_ref().filter(|_| mac && ry + addr_h <= end) {
+            text(f, &format!("mac {m}"), Point::new(x + 16, ry), addr_font, DOCKER, Alignment::Left);
             ry += addr_h;
         }
         ry += 5;
@@ -734,8 +746,8 @@ pub fn render_page(
                 draw_services(&mut f, (margin, y, cw, flex_h), title, *error, units);
                 y += flex_h;
             }
-            Item::Network { title, ifaces } => {
-                draw_network(&mut f, (margin, y, cw, flex_h), title, ifaces);
+            Item::Network { title, ifaces, mac } => {
+                draw_network(&mut f, (margin, y, cw, flex_h), title, ifaces, *mac);
                 y += flex_h;
             }
             Item::Status => {}
@@ -831,7 +843,7 @@ mod tests {
                 aux_label: "BLT",
                 vram: None,
             }],
-            interfaces: Some(crate::netif::list(true)),
+            interfaces: Some(crate::netif::list()),
             services: Some(crate::services::ServiceList {
                 error: None,
                 units: (0..40)
