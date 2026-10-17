@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           ax206mon
-Version:        0.1.0
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Status dashboard for AX206-protocol USB mini displays
 License:        MIT
@@ -23,9 +23,9 @@ Requires(pre):  shadow-utils
 %description
 ax206mon drives cheap 3.5" USB "AIDA64" mini screens that use the AX206
 digital photo frame protocol (USB ID 1908:0102, e.g. QDtech USB-Display)
-and shows a live dashboard with clock, CPU, memory, disk, temperature,
-load and network rates. Runs as a systemd service and reconnects
-automatically when the display is unplugged.
+and shows a configurable, rotating set of dashboard pages: clock, CPU, memory,
+disk, temperature, GPU load, network rates and docker compose stacks. Runs as
+a systemd service and reconnects automatically when the display is unplugged.
 
 %prep
 %autosetup
@@ -42,7 +42,7 @@ cargo test --release --frozen --offline
 install -Dpm 0755 target/release/%{name} %{buildroot}%{_bindir}/%{name}
 install -Dpm 0644 packaging/%{name}.service %{buildroot}%{_unitdir}/%{name}.service
 install -Dpm 0644 packaging/70-%{name}.rules %{buildroot}%{_udevrulesdir}/70-%{name}.rules
-install -Dpm 0644 packaging/config.toml %{buildroot}%{_sysconfdir}/%{name}/config.toml
+install -Dpm 0644 packaging/%{name}.conf %{buildroot}%{_sysconfdir}/%{name}/%{name}.conf
 
 %pre
 getent group %{name} >/dev/null || groupadd -r %{name}
@@ -69,8 +69,14 @@ udevadm trigger --subsystem-match=usb --attr-match=idVendor=1908 >/dev/null 2>&1
 %{_unitdir}/%{name}.service
 %{_udevrulesdir}/70-%{name}.rules
 %dir %{_sysconfdir}/%{name}
-%config(noreplace) %{_sysconfdir}/%{name}/config.toml
+%config(noreplace) %{_sysconfdir}/%{name}/%{name}.conf
 
 %changelog
+* Sat Oct 17 2026 Zeljko Milinkov <zeljko.milinkov@gmail.com> - 0.2.0-1
+- Config file moved to /etc/ax206mon/ax206mon.conf with [global] and [[page]] tables
+- Multiple pages that rotate; portrait by default
+- CPU/RAM bars split into load types; Radeon and Intel Arc GPU bars
+- Docker status and compose stack pages
+
 * Sat Oct 17 2026 Zeljko Milinkov <zeljko.milinkov@gmail.com> - 0.1.0-1
 - Initial package

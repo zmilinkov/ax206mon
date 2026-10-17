@@ -1,48 +1,180 @@
-//! Configuration file (TOML). Every key is optional; see
-//! packaging/config.toml for the documented defaults.
+//! Configuration file (TOML): a `[global]` table plus one `[[page]]` table
+//! per dashboard page. Every key is optional; see packaging/ax206mon.conf
+//! for the documented defaults.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use serde::de::{Deserializer, Error as _};
 use serde::Deserialize;
 
-pub const DEFAULT_PATH: &str = "/etc/ax206mon/config.toml";
+pub const DEFAULT_PATH: &str = "/etc/ax206mon/ax206mon.conf";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub global: Global,
+    /// Dashboard pages, shown in order. Defaults to the built-in pages.
+    #[serde(rename = "page")]
+    pub pages: Vec<Page>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Global {
     /// Clockwise rotation of the picture: 0, 90, 180 or 270.
     pub rotate: u16,
     /// Backlight level 0-7 set when the display is opened.
     pub backlight: u8,
     /// Turn the backlight off when the service stops.
     pub backlight_off_on_exit: bool,
-    /// Seconds between dashboard refreshes (a frame takes ~1.2 s to send).
-    pub interval: f64,
-    /// Filesystem whose usage is shown.
+    /// Seconds between redraws of the current page (a frame takes ~1.2 s to send).
+    pub refresh_interval: f64,
+    /// Seconds to stay on a page before moving to the next one.
+    pub page_duration: f64,
+    /// Filesystem used by `disk` widgets that don't set their own `path`.
     pub disk_path: String,
     /// Network interface for rx/tx rates; empty = all except loopback.
     pub net_interface: String,
     /// Temperature file in millidegrees C; empty = auto-detect.
     pub temp_file: String,
+    /// Docker Engine API socket.
+    pub docker_socket: String,
     /// Panel size as "WxH"; empty = ask the display.
     pub size: String,
     /// Frame data chunk size in bytes (Windows driver uses 262144).
     pub chunk_size: usize,
 }
 
-impl Default for Config {
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Page {
+    /// Shown in the page header when there is more than one page.
+    pub name: String,
+    /// Seconds to stay on this page; overrides `global.page_duration`.
+    pub duration: Option<f64>,
+    /// Widgets from top to bottom. `status` widgets always sit at the bottom.
+    pub widgets: Vec<Widget>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// CPU load bar, processing vs. I/O wait.
+    Cpu,
+    /// Memory bar: apps / system / buffers+cache.
+    Ram,
+    /// Filesystem usage bar.
+    Disk,
+    /// CPU temperature bar.
+    Temp,
+    /// GPU load bar plus blitter / memory activity bar (Radeon, Intel Arc).
+    Gpu,
+    /// Footer line: hostname, uptime, load, network rates.
+    Status,
+    /// Docker daemon reachability and container counts.
+    DockerStatus,
+    /// Running docker compose stacks.
+    DockerStacks,
+}
+
+/// A widget is either just its kind (`"cpu"`) or a table with options
+/// (`{ type = "disk", path = "/data", label = "DATA" }`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Widget {
+    pub kind: Kind,
+    pub label: Option<String>,
+    /// `disk`: filesystem to show.
+    pub path: Option<String>,
+    /// `gpu`: DRM card name such as "card1"; default = first GPU found.
+    pub card: Option<String>,
+}
+
+impl Widget {
+    pub fn new(kind: Kind) -> Self {
+        Self {
+            kind,
+            label: None,
+            path: None,
+            card: None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Widget {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Full {
+            #[serde(rename = "type")]
+            kind: Kind,
+            label: Option<String>,
+            path: Option<String>,
+            card: Option<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Name(String),
+            Full(Full),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Full(f) => Ok(Widget {
+                kind: f.kind,
+                label: f.label,
+                path: f.path,
+                card: f.card,
+            }),
+            Raw::Name(s) => {
+                let kind = Kind::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(&s))
+                    .map_err(|_| {
+                        D::Error::custom(format!(
+                            "unknown widget {s:?} (cpu, ram, disk, temp, gpu, status, \
+                             docker_status, docker_stacks)"
+                        ))
+                    })?;
+                Ok(Widget::new(kind))
+            }
+        }
+    }
+}
+
+impl Default for Global {
     fn default() -> Self {
         Self {
-            rotate: 0,
+            rotate: 90,
             backlight: 7,
             backlight_off_on_exit: true,
-            interval: 2.0,
+            refresh_interval: 2.0,
+            page_duration: 15.0,
             disk_path: "/".into(),
             net_interface: String::new(),
             temp_file: String::new(),
+            docker_socket: crate::docker::DEFAULT_SOCKET.into(),
             size: String::new(),
             chunk_size: crate::ax206::DEFAULT_CHUNK,
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        use Kind::*;
+        let w = |kinds: &[Kind]| kinds.iter().map(|&k| Widget::new(k)).collect();
+        Self {
+            global: Global::default(),
+            pages: vec![
+                Page {
+                    name: "System".into(),
+                    duration: None,
+                    widgets: w(&[Cpu, Ram, Disk, Temp, Gpu, Status]),
+                },
+                Page {
+                    name: "Docker".into(),
+                    duration: None,
+                    widgets: w(&[DockerStatus, DockerStacks]),
+                },
+            ],
         }
     }
 }
@@ -58,7 +190,8 @@ impl Config {
             Ok(s) => {
                 let c: Config =
                     toml::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
-                c.validate()?;
+                c.validate()
+                    .with_context(|| format!("in {}", path.display()))?;
                 log::debug!("loaded config from {}", path.display());
                 Ok(c)
             }
@@ -70,21 +203,43 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if crate::frame::Rotation::from_degrees(self.rotate).is_none() {
-            bail!("rotate must be 0, 90, 180 or 270 (got {})", self.rotate);
+        let g = &self.global;
+        if crate::frame::Rotation::from_degrees(g.rotate).is_none() {
+            bail!("global.rotate must be 0, 90, 180 or 270 (got {})", g.rotate);
         }
-        if self.backlight > 7 {
-            bail!("backlight must be 0-7 (got {})", self.backlight);
+        if g.backlight > 7 {
+            bail!("global.backlight must be 0-7 (got {})", g.backlight);
         }
-        if !(0.1..=3600.0).contains(&self.interval) {
-            bail!("interval must be between 0.1 and 3600 seconds");
+        if !(0.1..=3600.0).contains(&g.refresh_interval) {
+            bail!("global.refresh_interval must be between 0.1 and 3600 seconds");
         }
-        parse_size(&self.size)?;
+        if !(1.0..=86_400.0).contains(&g.page_duration) {
+            bail!("global.page_duration must be between 1 and 86400 seconds");
+        }
+        if self.pages.is_empty() {
+            bail!("at least one [[page]] is required");
+        }
+        for (i, p) in self.pages.iter().enumerate() {
+            if let Some(d) = p.duration {
+                if !(1.0..=86_400.0).contains(&d) {
+                    bail!("page {}: duration must be between 1 and 86400 seconds", i + 1);
+                }
+            }
+            if p.widgets.is_empty() {
+                bail!("page {}: no widgets", i + 1);
+            }
+        }
+        parse_size(&g.size)?;
         Ok(())
     }
 
     pub fn size(&self) -> Option<(u16, u16)> {
-        parse_size(&self.size).ok().flatten()
+        parse_size(&self.global.size).ok().flatten()
+    }
+
+    /// How long page `i` stays on screen.
+    pub fn page_duration(&self, i: usize) -> f64 {
+        self.pages[i].duration.unwrap_or(self.global.page_duration)
     }
 }
 
@@ -109,16 +264,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn packaged_config_parses() {
-        let s = include_str!("../packaging/config.toml");
+    fn packaged_config_parses_and_matches_defaults() {
+        let s = include_str!("../packaging/ax206mon.conf");
         let c: Config = toml::from_str(s).unwrap();
         c.validate().unwrap();
+        let d = Config::default();
+        assert_eq!(c.global.rotate, d.global.rotate);
+        assert_eq!(c.pages.len(), d.pages.len());
+        for (a, b) in c.pages.iter().zip(&d.pages) {
+            assert_eq!(a.widgets, b.widgets);
+        }
     }
 
     #[test]
     fn rejects_bad_rotation() {
-        let c: Config = toml::from_str("rotate = 45").unwrap();
+        let c: Config = toml::from_str("[global]\nrotate = 45").unwrap();
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn widget_forms() {
+        let c: Config = toml::from_str(
+            r#"
+            [[page]]
+            widgets = ["cpu", { type = "disk", path = "/data", label = "DATA" }]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.pages[0].widgets[0], Widget::new(Kind::Cpu));
+        assert_eq!(c.pages[0].widgets[1].path.as_deref(), Some("/data"));
+    }
+
+    #[test]
+    fn unknown_widget_is_an_error() {
+        let e = toml::from_str::<Config>("[[page]]\nwidgets = [\"cpuu\"]").unwrap_err();
+        assert!(e.to_string().contains("unknown widget"), "{e}");
     }
 
     #[test]
