@@ -76,7 +76,7 @@ pub struct Needs {
     pub interfaces: Option<bool>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Options {
     /// Docker Engine API socket.
     pub docker_socket: String,
@@ -86,20 +86,11 @@ pub struct Options {
     pub temp_file: Option<PathBuf>,
 }
 
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            docker_socket: docker::DEFAULT_SOCKET.into(),
-            net_iface: None,
-            temp_file: None,
-        }
-    }
-}
-
 pub struct Collector {
     opts: Options,
     temp_file: Option<PathBuf>,
     prev_cpu: Option<[u64; 3]>,
+    last_docker_error: Option<String>,
     gpus: Option<Vec<gpu::Probe>>,
     prev_net: Option<(Instant, u64, u64)>,
 }
@@ -116,6 +107,7 @@ impl Collector {
             opts,
             temp_file,
             prev_cpu: None,
+            last_docker_error: None,
             gpus: None,
             prev_net: None,
         };
@@ -146,9 +138,7 @@ impl Collector {
                 .filter_map(|p| Some((p.clone(), disk_usage(p)?)))
                 .collect(),
             gpus,
-            docker: needs
-                .docker
-                .then(|| docker::query(&self.opts.docker_socket)),
+            docker: needs.docker.then(|| self.docker()),
             services: needs.services.then(services::query),
             interfaces: needs.interfaces.map(netif::list),
             temp_c: self.temp_file.as_deref().and_then(read_millideg),
@@ -157,6 +147,20 @@ impl Collector {
             net_rx_bps,
             net_tx_bps,
         }
+    }
+
+    /// Query docker, logging (once per change) why it is unavailable so
+    /// `journalctl -u ax206mon` explains an empty page.
+    fn docker(&mut self) -> DockerStatus {
+        let st = docker::query(&self.opts.docker_socket);
+        if st.error != self.last_docker_error {
+            match &st.error {
+                Some(e) => log::warn!("docker unavailable: {e}"),
+                None => log::info!("docker available"),
+            }
+            self.last_docker_error = st.error.clone();
+        }
+        st
     }
 
     fn cpu(&mut self) -> Option<CpuUsage> {

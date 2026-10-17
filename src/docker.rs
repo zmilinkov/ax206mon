@@ -10,7 +10,9 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 
-pub const DEFAULT_SOCKET: &str = "/var/run/docker.sock";
+/// Tried in order when no socket is configured. Podman's API is
+/// Docker-compatible, so a podman-only host (e.g. AlmaLinux) works too.
+pub const AUTO_SOCKETS: &[&str] = &["/var/run/docker.sock", "/run/podman/podman.sock"];
 const TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_BODY: u64 = 16 << 20;
 
@@ -42,24 +44,38 @@ impl DockerStatus {
     }
 }
 
+/// Query the engine at `socket`; empty = try [`AUTO_SOCKETS`].
 pub fn query(socket: &str) -> DockerStatus {
-    match try_query(socket) {
+    match pick_socket(socket).and_then(|p| try_query(&p).map_err(|e| explain(&e, &p))) {
         Ok(s) => s,
         Err(e) => DockerStatus {
-            error: Some(short_error(&e)),
+            error: Some(e),
             ..Default::default()
         },
     }
 }
 
-fn short_error(e: &anyhow::Error) -> String {
+fn pick_socket(configured: &str) -> Result<String, String> {
+    if !configured.is_empty() {
+        return Ok(configured.to_string());
+    }
+    AUTO_SOCKETS
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .map(|p| p.to_string())
+        .ok_or_else(|| format!("no engine socket found (tried {})", AUTO_SOCKETS.join(", ")))
+}
+
+/// Human-readable failure, with the fix for the common permission case.
+fn explain(e: &anyhow::Error, socket: &str) -> String {
     let root = e.root_cause().to_string();
-    if root.to_lowercase().contains("permission denied") {
-        "permission denied".into()
-    } else if root.to_lowercase().contains("no such file") {
-        "not running".into()
+    let low = root.to_lowercase();
+    if low.contains("permission denied") {
+        format!("permission denied on {socket}; add the service user to the docker group: usermod -aG docker ax206mon")
+    } else if low.contains("no such file") || low.contains("connection refused") {
+        format!("engine not running ({socket})")
     } else {
-        root
+        format!("{socket}: {root}")
     }
 }
 
@@ -246,6 +262,14 @@ mod tests {
     #[test]
     fn missing_socket_is_reported() {
         let st = query("/nonexistent/docker.sock");
-        assert!(!st.up());
+        assert!(st.error.unwrap().contains("/nonexistent/docker.sock"));
+    }
+
+    #[test]
+    fn permission_error_explains_the_fix() {
+        let e = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            .context("connecting");
+        let m = explain(&e, "/var/run/docker.sock");
+        assert!(m.contains("docker group"), "{m}");
     }
 }

@@ -38,7 +38,7 @@ pub struct Global {
     pub net_interface: String,
     /// Temperature file in millidegrees C; empty = auto-detect.
     pub temp_file: String,
-    /// Docker Engine API socket.
+    /// Docker Engine API socket; empty = auto (docker, then podman).
     pub docker_socket: String,
     /// Panel size as "WxH"; empty = ask the display.
     pub size: String,
@@ -169,7 +169,7 @@ impl Default for Global {
             disk_path: "/".into(),
             net_interface: String::new(),
             temp_file: String::new(),
-            docker_socket: crate::docker::DEFAULT_SOCKET.into(),
+            docker_socket: String::new(),
             size: String::new(),
             chunk_size: crate::ax206::DEFAULT_CHUNK,
         }

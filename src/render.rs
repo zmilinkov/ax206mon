@@ -182,6 +182,48 @@ fn char_h(font: &MonoFont) -> i32 {
     font.character_size.height as i32
 }
 
+/// Break `s` into lines of at most `max` chars at spaces (long words are cut).
+fn wrap(s: &str, max: usize) -> Vec<String> {
+    let max = max.max(1);
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    for word in s.split_whitespace() {
+        let mut word = word.to_string();
+        while word.chars().count() > max {
+            if !cur.is_empty() {
+                lines.push(std::mem::take(&mut cur));
+            }
+            let head: String = word.chars().take(max).collect();
+            word = word.chars().skip(max).collect();
+            lines.push(head);
+        }
+        let extra = usize::from(!cur.is_empty());
+        if cur.chars().count() + extra + word.chars().count() > max {
+            lines.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(&word);
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
+/// Draw an error message wrapped to `w`, as many lines as fit before `end`.
+fn draw_error(f: &mut Frame, x: i32, mut y: i32, w: i32, end: i32, msg: &str) {
+    let font = &PROFONT_12_POINT;
+    for line in wrap(msg, (w / char_w(font)) as usize) {
+        if y + char_h(font) > end {
+            break;
+        }
+        text(f, &line, Point::new(x, y), font, WARN, Alignment::Left);
+        y += char_h(font) + 2;
+    }
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -520,7 +562,7 @@ fn draw_docker_status(f: &mut Frame, x: i32, y: i32, w: i32, d: &DockerStatus) {
     let y1 = y + char_h(title) + 4;
     let lh = char_h(small) + 3;
     if let Some(e) = &d.error {
-        text(f, &truncate(e, (w / char_w(small)) as usize), Point::new(x, y1), small, WARN, Alignment::Left);
+        draw_error(f, x, y1, w, y1 + 3 * (char_h(&PROFONT_12_POINT) + 2) + 4, e);
         return;
     }
     let v = if d.version.is_empty() { String::new() } else { format!("engine {}", d.version) };
@@ -631,8 +673,10 @@ fn draw_docker_stacks(f: &mut Frame, x: i32, y: i32, w: i32, h: i32, d: &DockerS
     let row_h = char_h(small) + 8;
     let mut ry = y + char_h(title) + 6;
     if !d.up() || d.stacks.is_empty() {
-        let msg = if d.up() { "no compose stacks running" } else { "docker unavailable" };
-        text(f, msg, Point::new(x, ry), small, MUTED, Alignment::Left);
+        match &d.error {
+            Some(e) => draw_error(f, x, ry, w, y + h, &format!("docker unavailable: {e}")),
+            None => text(f, "no compose stacks running", Point::new(x, ry), small, MUTED, Alignment::Left),
+        }
         return;
     }
     let fit = (((y + h - ry) / row_h).max(1)) as usize;
@@ -809,6 +853,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wrap_breaks_at_spaces_and_cuts_long_words() {
+        assert_eq!(wrap("aaa bbb ccc", 7), ["aaa bbb", "ccc"]);
+        assert_eq!(wrap("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
     fn human_bytes_formats() {
         assert_eq!(human_bytes(512), "512B");
         assert_eq!(human_bytes(1536), "1.5K");
@@ -866,6 +916,22 @@ mod tests {
                 }
             }
         }
+        // A long docker error wraps instead of running off the screen.
+        let down = Snapshot {
+            docker: Some(DockerStatus {
+                error: Some("permission denied on /var/run/docker.sock; add the service user to the docker group".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let dump_down = |name: &str, i: usize, w, h| {
+            let info = PageInfo { page: &cfg.pages[i], index: i, count: cfg.pages.len() };
+            let f = render_page(w, h, &info, &cfg.global, &down, &c);
+            if let Some(d) = &dump {
+                f.to_rgb_image().save(std::path::Path::new(d).join(name)).unwrap();
+            }
+        };
+        dump_down("down_stacks.png", cfg.pages.len() - 1, 320, 480);
         // Docker unreachable / nothing collected must not panic either.
         let none = Snapshot::default();
         for i in 0..cfg.pages.len() {
