@@ -70,6 +70,8 @@ pub enum Kind {
     Temp,
     /// GPU load bar plus blitter / memory activity bar (Radeon, Intel Arc).
     Gpu,
+    /// systemd services, named as `systemctl list-units -t service` shows them.
+    Services,
     /// Footer line: hostname, uptime, load, network rates.
     Status,
     /// Docker daemon reachability and container counts.
@@ -88,6 +90,10 @@ pub struct Widget {
     pub path: Option<String>,
     /// `gpu`: DRM card name such as "card1"; default = first GPU found.
     pub card: Option<String>,
+    /// `services`: units to show, in this order (".service" is optional).
+    pub units: Option<Vec<String>>,
+    /// `services` without `units`: "running" (default), "active", "failed" or "all".
+    pub filter: Option<String>,
 }
 
 impl Widget {
@@ -97,6 +103,8 @@ impl Widget {
             label: None,
             path: None,
             card: None,
+            units: None,
+            filter: None,
         }
     }
 }
@@ -111,6 +119,8 @@ impl<'de> Deserialize<'de> for Widget {
             label: Option<String>,
             path: Option<String>,
             card: Option<String>,
+            units: Option<Vec<String>>,
+            filter: Option<String>,
         }
         #[derive(Deserialize)]
         #[serde(untagged)]
@@ -124,13 +134,15 @@ impl<'de> Deserialize<'de> for Widget {
                 label: f.label,
                 path: f.path,
                 card: f.card,
+                units: f.units,
+                filter: f.filter,
             }),
             Raw::Name(s) => {
                 let kind = Kind::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(&s))
                     .map_err(|_| {
                         D::Error::custom(format!(
-                            "unknown widget {s:?} (cpu, ram, disk, temp, gpu, status, \
-                             docker_status, docker_stacks)"
+                            "unknown widget {s:?} (cpu, ram, disk, temp, gpu, services, \
+                             status, docker_status, docker_stacks)"
                         ))
                     })?;
                 Ok(Widget::new(kind))
@@ -142,7 +154,7 @@ impl<'de> Deserialize<'de> for Widget {
 impl Default for Global {
     fn default() -> Self {
         Self {
-            rotate: 90,
+            rotate: 270,
             backlight: 7,
             backlight_off_on_exit: true,
             refresh_interval: 2.0,
@@ -170,9 +182,14 @@ impl Default for Config {
                     widgets: w(&[Cpu, Ram, Disk, Temp, Gpu, Status]),
                 },
                 Page {
-                    name: "Docker".into(),
+                    name: "Services".into(),
                     duration: None,
-                    widgets: w(&[DockerStatus, DockerStacks]),
+                    widgets: w(&[Services]),
+                },
+                Page {
+                    name: "Compose".into(),
+                    duration: None,
+                    widgets: w(&[DockerStacks]),
                 },
             ],
         }
@@ -227,6 +244,13 @@ impl Config {
             }
             if p.widgets.is_empty() {
                 bail!("page {}: no widgets", i + 1);
+            }
+            for w in &p.widgets {
+                if let Some(f) = &w.filter {
+                    if crate::services::Filter::parse(f).is_none() {
+                        bail!("page {}: filter must be running, active, failed or all (got {f:?})", i + 1);
+                    }
+                }
             }
         }
         parse_size(&g.size)?;

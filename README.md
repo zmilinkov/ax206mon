@@ -14,10 +14,14 @@ The display cycles through the pages defined in
   * GPU: Radeon shows graphics load plus memory activity (VRAM fill on kernels
     without `mem_busy_percent`); Intel Arc (i915) shows render engine plus
     blitter engine load. Hidden when no supported GPU is found.
-* **Page 2 (Docker)** – daemon state with container counts, and the running
-  docker compose stacks (`running/total` containers each).
+* **Page 2 (Services)** – systemd services named as `systemctl list-units -t
+  service` shows them, with their state. Only as many as fit are shown; use
+  `units = [...]` to choose which, or `filter` to pick running/active/failed/all.
+* **Page 3 (Compose)** – running docker compose stacks (`running/total`
+  containers each). A `docker_status` widget (daemon state, container counts)
+  is available too.
 
-Default orientation is portrait (`rotate = 90`); set `rotate` in `[global]` to
+Default orientation is portrait (`rotate = 270`); set `rotate` in `[global]` to
 0, 90, 180 or 270. The layout adapts: portrait uses stacked bars with legends,
 landscape uses one-line bars and a side-by-side header.
 

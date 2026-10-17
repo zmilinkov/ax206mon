@@ -11,6 +11,7 @@ use profont::{PROFONT_12_POINT, PROFONT_14_POINT, PROFONT_18_POINT, PROFONT_24_P
 use crate::config::{Global, Kind, Page};
 use crate::docker::DockerStatus;
 use crate::frame::Frame;
+use crate::services::{self, Filter, Unit};
 use crate::stats::Snapshot;
 
 pub mod palette {
@@ -126,6 +127,11 @@ enum Item<'a> {
     Bars(Vec<Bar>),
     DockerStatus(&'a DockerStatus),
     DockerStacks(&'a DockerStatus),
+    Services {
+        title: String,
+        error: Option<&'a str>,
+        units: Vec<Unit>,
+    },
     Status,
 }
 
@@ -392,6 +398,16 @@ fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a
                     items.push(Item::Bars(rows));
                 }
             }
+            Kind::Services => {
+                if let Some(l) = &s.services {
+                    let filter = w.filter.as_deref().and_then(Filter::parse).unwrap_or(Filter::Running);
+                    items.push(Item::Services {
+                        title: label("SERVICES"),
+                        error: l.error.as_deref(),
+                        units: services::select(&l.units, w.units.as_deref(), filter),
+                    });
+                }
+            }
             Kind::Status => items.push(Item::Status),
             Kind::DockerStatus | Kind::DockerStacks => {
                 if let Some(d) = &s.docker {
@@ -514,6 +530,46 @@ fn draw_docker_status(f: &mut Frame, x: i32, y: i32, w: i32, d: &DockerStatus) {
     text(f, &truncate(&line, (w / char_w(small)) as usize), Point::new(x, y1 + lh), small, c, Alignment::Left);
 }
 
+fn unit_color(u: &Unit) -> Rgb888 {
+    match (u.active.as_str(), u.sub.as_str()) {
+        ("failed", _) => WARN,
+        (_, "running") => RAM,
+        (_, "exited") | (_, "dead") | ("inactive", _) => MUTED,
+        _ => TEMP,
+    }
+}
+
+/// Services that fit in the available height; the rest are dropped.
+fn draw_services(f: &mut Frame, (x, y, w, h): (i32, i32, i32, i32), title: &str, error: Option<&str>, units: &[Unit]) {
+    let big = &PROFONT_18_POINT;
+    let small = &PROFONT_14_POINT;
+    text(f, title, Point::new(x, y), big, DOCKER, Alignment::Left);
+    let count = if error.is_some() { "-".to_string() } else { units.len().to_string() };
+    text(f, &count, Point::new(x + w, y), big, TEXT, Alignment::Right);
+    let row_h = char_h(small) + 8;
+    let mut ry = y + char_h(big) + 6;
+    if let Some(e) = error {
+        text(f, &truncate(e, (w / char_w(small)) as usize), Point::new(x, ry), small, WARN, Alignment::Left);
+        return;
+    }
+    if units.is_empty() {
+        text(f, "no matching services", Point::new(x, ry), small, MUTED, Alignment::Left);
+        return;
+    }
+    let fit = ((y + h - ry) / row_h).max(0) as usize;
+    for u in units.iter().take(fit) {
+        let color = unit_color(u);
+        let _ = Rectangle::new(Point::new(x, ry + 4), Size::new(8, 8))
+            .into_styled(PrimitiveStyle::with_fill(color))
+            .draw(f);
+        let sub = truncate(&u.sub, 9);
+        let max = ((w - 16) / char_w(small)) as usize - sub.chars().count() - 1;
+        text(f, &truncate(&u.name, max), Point::new(x + 16, ry), small, TEXT, Alignment::Left);
+        text(f, &sub, Point::new(x + w, ry), small, color, Alignment::Right);
+        ry += row_h;
+    }
+}
+
 fn draw_docker_stacks(f: &mut Frame, x: i32, y: i32, w: i32, h: i32, d: &DockerStatus) {
     let title = &PROFONT_18_POINT;
     let small = &PROFONT_14_POINT;
@@ -585,7 +641,8 @@ pub fn render_page(
         Item::DockerStatus(_) => DOCKER_STATUS_H,
         _ => 0,
     };
-    let flex = body.iter().filter(|i| matches!(i, Item::DockerStacks(_))).count() as i32;
+    let is_flex = |i: &Item| matches!(i, Item::DockerStacks(_) | Item::Services { .. });
+    let flex = body.iter().filter(|i| is_flex(i)).count() as i32;
     let fixed: i32 = body.iter().map(|i| natural(i)).sum();
     const MIN_FLEX: i32 = 60;
     let scale = if flex > 0 {
@@ -619,6 +676,10 @@ pub fn render_page(
             }
             Item::DockerStacks(d) => {
                 draw_docker_stacks(&mut f, margin, y, cw, flex_h, d);
+                y += flex_h;
+            }
+            Item::Services { title, error, units } => {
+                draw_services(&mut f, (margin, y, cw, flex_h), title, *error, units);
                 y += flex_h;
             }
             Item::Status => {}
@@ -714,6 +775,12 @@ mod tests {
                 aux_label: "BLT",
                 vram: None,
             }],
+            services: Some(crate::services::ServiceList {
+                error: None,
+                units: (0..40)
+                    .map(|i| Unit { name: format!("svc-{i}.service"), active: "active".into(), sub: "running".into() })
+                    .collect(),
+            }),
             docker: Some(DockerStatus {
                 version: "27.1".into(),
                 total: 20,
@@ -744,7 +811,9 @@ mod tests {
         }
         // Docker unreachable / nothing collected must not panic either.
         let none = Snapshot::default();
-        let info = PageInfo { page: &cfg.pages[1], index: 1, count: 2 };
-        render_page(320, 480, &info, &cfg.global, &none, &c);
+        for i in 0..cfg.pages.len() {
+            let info = PageInfo { page: &cfg.pages[i], index: i, count: cfg.pages.len() };
+            render_page(320, 480, &info, &cfg.global, &none, &c);
+        }
     }
 }
