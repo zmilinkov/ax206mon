@@ -7,6 +7,7 @@ Type=simple
 ExecStart=/usr/bin/ax206mon run
 User=ax206mon
 Group=ax206mon
+SupplementaryGroups=docker
 # The program itself waits for the display and survives unplugging;
 # this only covers crashes and config errors.
 Restart=on-failure
