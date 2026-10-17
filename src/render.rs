@@ -1,4 +1,4 @@
-//! Drawing: the status dashboard, a test pattern and image fitting.
+//! Drawing: dashboard pages, a test pattern and image fitting.
 //! Layout adapts to landscape (480x320) and portrait (320x480) canvases.
 
 use embedded_graphics::mono_font::{MonoFont, MonoTextStyle};
@@ -8,6 +8,8 @@ use embedded_graphics::primitives::{PrimitiveStyle, Rectangle, RoundedRectangle}
 use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
 use profont::{PROFONT_12_POINT, PROFONT_14_POINT, PROFONT_18_POINT, PROFONT_24_POINT};
 
+use crate::config::{Global, Kind, Page};
+use crate::docker::DockerStatus;
 use crate::frame::Frame;
 use crate::stats::Snapshot;
 
@@ -22,6 +24,7 @@ pub mod palette {
     pub const DISK: Rgb888 = Rgb888::new(0xb4, 0x8c, 0xff);
     pub const TEMP: Rgb888 = Rgb888::new(0xff, 0xa0, 0x3c);
     pub const WARN: Rgb888 = Rgb888::new(0xff, 0x55, 0x55);
+    pub const DOCKER: Rgb888 = Rgb888::new(0x4f, 0xc3, 0xf7);
 }
 use palette::*;
 
@@ -82,25 +85,189 @@ fn text_scaled(
     f.blit_scaled(&tmp, center_x - (w * scale) as i32 / 2, top, scale, key);
 }
 
-fn bar(f: &mut Frame, x: i32, y: i32, w: u32, h: u32, frac: f32, color: Rgb888) {
+/// One segment of a (possibly stacked) bar.
+#[derive(Clone, Copy)]
+struct Seg {
+    frac: f32,
+    color: Rgb888,
+}
+
+/// A labelled bar row. Rows after the first in a widget are drawn smaller.
+struct Bar {
+    label: String,
+    value: String,
+    segs: Vec<Seg>,
+    /// Colour key shown under the bar in the stacked (portrait) style.
+    legend: Vec<(String, Rgb888)>,
+    /// Label colour when not hot.
+    color: Rgb888,
+    /// 90 % or more of the bar is filled.
+    hot: bool,
+}
+
+impl Bar {
+    fn simple(label: impl Into<String>, value: String, frac: f32, color: Rgb888) -> Self {
+        let hot = frac >= 0.9;
+        Bar {
+            label: label.into(),
+            value,
+            segs: vec![Seg {
+                frac,
+                color: if hot { WARN } else { color },
+            }],
+            legend: Vec::new(),
+            color,
+            hot,
+        }
+    }
+}
+
+enum Item<'a> {
+    Bars(Vec<Bar>),
+    DockerStatus(&'a DockerStatus),
+    DockerStacks(&'a DockerStatus),
+    Status,
+}
+
+/// How a bar row is laid out.
+#[derive(Clone, Copy)]
+enum Style {
+    /// Label and value above the bar, legend below (portrait).
+    Stacked,
+    /// Label, bar and value on one line.
+    Line {
+        label: &'static MonoFont<'static>,
+        value: &'static MonoFont<'static>,
+        bar_h: u32,
+    },
+}
+
+const LINE_MAIN: Style = Style::Line {
+    label: &PROFONT_18_POINT,
+    value: &PROFONT_14_POINT,
+    bar_h: 12,
+};
+const LINE_SUB: Style = Style::Line {
+    label: &PROFONT_14_POINT,
+    value: &PROFONT_12_POINT,
+    bar_h: 8,
+};
+const BAR_H: u32 = 12;
+const STATUS_H: i32 = 26;
+
+fn style_for(portrait: bool, row: usize) -> Style {
+    match (row, portrait) {
+        (0, true) => Style::Stacked,
+        (0, false) => LINE_MAIN,
+        _ => LINE_SUB,
+    }
+}
+
+fn char_w(font: &MonoFont) -> i32 {
+    (font.character_size.width + font.character_spacing) as i32
+}
+
+fn char_h(font: &MonoFont) -> i32 {
+    font.character_size.height as i32
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut t: String = s.chars().take(max.saturating_sub(1)).collect();
+        t.push('~');
+        t
+    }
+}
+
+fn bar_height(b: &Bar, style: Style) -> i32 {
+    match style {
+        Style::Stacked => {
+            let legend = if b.legend.is_empty() {
+                0
+            } else {
+                3 + char_h(&PROFONT_12_POINT)
+            };
+            char_h(&PROFONT_18_POINT) + 4 + BAR_H as i32 + legend + 8
+        }
+        Style::Line { label, bar_h, .. } => char_h(label).max(bar_h as i32) + 8,
+    }
+}
+
+fn bars_height(bars: &[Bar], portrait: bool) -> i32 {
+    bars.iter()
+        .enumerate()
+        .map(|(i, b)| bar_height(b, style_for(portrait, i)))
+        .sum()
+}
+
+fn bar(f: &mut Frame, x: i32, y: i32, w: u32, h: u32, segs: &[Seg]) {
     let r = Size::new(h / 2, h / 2);
     let _ =
         RoundedRectangle::with_equal_corners(Rectangle::new(Point::new(x, y), Size::new(w, h)), r)
             .into_styled(PrimitiveStyle::with_fill(PANEL))
             .draw(f);
-    let fw = ((w as f32) * frac.clamp(0.0, 1.0)).round() as u32;
-    if fw >= h {
-        let _ = RoundedRectangle::with_equal_corners(
-            Rectangle::new(Point::new(x, y), Size::new(fw, h)),
-            r,
-        )
-        .into_styled(PrimitiveStyle::with_fill(color))
-        .draw(f);
-    } else if fw > 0 {
-        let _ = Rectangle::new(Point::new(x, y), Size::new(fw, h))
+    // Paint cumulative fills from the longest to the shortest, so each
+    // segment's colour ends where the next one begins.
+    let mut cum = 0.0f32;
+    let ends: Vec<(f32, Rgb888)> = segs
+        .iter()
+        .map(|s| {
+            cum = (cum + s.frac.max(0.0)).min(1.0);
+            (cum, s.color)
+        })
+        .collect();
+    for &(end, color) in ends.iter().rev() {
+        let fw = ((w as f32) * end).round() as u32;
+        if fw >= h {
+            let _ = RoundedRectangle::with_equal_corners(
+                Rectangle::new(Point::new(x, y), Size::new(fw, h)),
+                r,
+            )
             .into_styled(PrimitiveStyle::with_fill(color))
             .draw(f);
+        } else if fw > 0 {
+            let _ = Rectangle::new(Point::new(x, y), Size::new(fw, h))
+                .into_styled(PrimitiveStyle::with_fill(color))
+                .draw(f);
+        }
     }
+}
+
+/// Draw one bar row in `x..x+w` starting at `y`; returns its height.
+fn draw_bar_row(f: &mut Frame, x: i32, y: i32, w: i32, b: &Bar, style: Style) -> i32 {
+    let label_color = if b.hot { WARN } else { b.color };
+    match style {
+        Style::Stacked => {
+            let font = &PROFONT_18_POINT;
+            text(f, &b.label, Point::new(x, y), font, label_color, Alignment::Left);
+            text(f, &b.value, Point::new(x + w, y), font, TEXT, Alignment::Right);
+            let bar_y = y + char_h(font) + 4;
+            bar(f, x, bar_y, w as u32, BAR_H, &b.segs);
+            let mut lx = x;
+            let lfont = &PROFONT_12_POINT;
+            let ly = bar_y + BAR_H as i32 + 3;
+            for (name, color) in &b.legend {
+                let _ = Rectangle::new(Point::new(lx, ly + 4), Size::new(6, 6))
+                    .into_styled(PrimitiveStyle::with_fill(*color))
+                    .draw(f);
+                text(f, name, Point::new(lx + 9, ly), lfont, MUTED, Alignment::Left);
+                lx += 9 + char_w(lfont) * name.chars().count() as i32 + 10;
+            }
+        }
+        Style::Line { label, value, bar_h } => {
+            let label_w = char_w(label) * 5;
+            let value_w = char_w(value) * b.value.chars().count() as i32;
+            let h = char_h(label).max(bar_h as i32);
+            text(f, &b.label, Point::new(x, y + (h - char_h(label)) / 2), label, label_color, Alignment::Left);
+            text(f, &b.value, Point::new(x + w, y + (h - char_h(value)) / 2), value, TEXT, Alignment::Right);
+            let bx = x + label_w + 6;
+            let bw = (w - label_w - 6 - value_w - 8).max(h);
+            bar(f, bx, y + (h - bar_h as i32) / 2, bw as u32, bar_h, &b.segs);
+        }
+    }
+    bar_height(b, style)
 }
 
 pub fn human_bytes(b: u64) -> String {
@@ -131,123 +298,168 @@ fn human_uptime(s: u64) -> String {
     }
 }
 
-struct Row {
-    label: &'static str,
-    value: String,
-    frac: f32,
-    color: Rgb888,
+fn frac(used: u64, total: u64) -> f32 {
+    if total == 0 {
+        0.0
+    } else {
+        used as f32 / total as f32
+    }
 }
 
-pub fn dashboard(width: u32, height: u32, s: &Snapshot, clock: &Clock) -> Frame {
-    let mut f = Frame::new(width, height, BG);
-    let w = width as i32;
-    let h = height as i32;
+// Blue shades for CPU, green for RAM; lighter = less "real" load.
+const CPU_IOWAIT: Rgb888 = Rgb888::new(0xa9, 0xd2, 0xff);
+const RAM_SYSTEM: Rgb888 = Rgb888::new(0x1f, 0x8a, 0x5e);
+const RAM_CACHE: Rgb888 = Rgb888::new(0xa6, 0xe8, 0xcf);
+const GPU: Rgb888 = Rgb888::new(0xff, 0x6f, 0xb5);
+
+fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a>> {
+    let mut items = Vec::new();
+    for w in &page.widgets {
+        let label = |default: &str| w.label.clone().unwrap_or_else(|| default.to_string());
+        match w.kind {
+            Kind::Cpu => {
+                let c = s.cpu;
+                let mut b = Bar::simple(label("CPU"), format!("{:.0}%", c.total()), c.total() / 100.0, CPU);
+                b.hot = c.total() >= 90.0;
+                b.segs = vec![
+                    Seg { frac: c.busy / 100.0, color: CPU },
+                    Seg { frac: c.iowait / 100.0, color: CPU_IOWAIT },
+                ];
+                b.legend = vec![
+                    (format!("proc {:.0}%", c.busy), CPU),
+                    (format!("iowait {:.0}%", c.iowait), CPU_IOWAIT),
+                ];
+                items.push(Item::Bars(vec![b]));
+            }
+            Kind::Ram => {
+                let m = s.mem;
+                let t = m.total.max(1) as f32;
+                let used_frac = frac(m.used(), m.total);
+                let mut b = Bar::simple(
+                    label("RAM"),
+                    format!("{} / {}", human_bytes(m.used()), human_bytes(m.total)),
+                    used_frac,
+                    RAM,
+                );
+                b.hot = used_frac >= 0.9;
+                b.segs = vec![
+                    Seg { frac: m.apps as f32 / t, color: RAM },
+                    Seg { frac: m.kernel as f32 / t, color: RAM_SYSTEM },
+                    Seg { frac: m.cache as f32 / t, color: RAM_CACHE },
+                ];
+                b.legend = vec![
+                    (format!("apps {}", human_bytes(m.apps)), RAM),
+                    (format!("sys {}", human_bytes(m.kernel)), RAM_SYSTEM),
+                    (format!("cache {}", human_bytes(m.cache)), RAM_CACHE),
+                ];
+                items.push(Item::Bars(vec![b]));
+            }
+            Kind::Disk => {
+                let path = w.path.as_deref().unwrap_or(&global.disk_path);
+                let (used, total) = s.disks.get(path).copied().unwrap_or((0, 0));
+                items.push(Item::Bars(vec![Bar::simple(
+                    label("DISK"),
+                    format!("{} / {}", human_bytes(used), human_bytes(total)),
+                    frac(used, total),
+                    DISK,
+                )]));
+            }
+            Kind::Temp => {
+                if let Some(t) = s.temp_c {
+                    items.push(Item::Bars(vec![Bar::simple(
+                        label("TEMP"),
+                        format!("{t:.0}\u{b0}C"),
+                        t / 100.0,
+                        TEMP,
+                    )]));
+                }
+            }
+            Kind::Gpu => {
+                let g = match &w.card {
+                    Some(c) => s.gpus.iter().find(|g| &g.card == c),
+                    None => s.gpus.first(),
+                };
+                if let Some(g) = g {
+                    let pct = |v: Option<f32>| v.map_or("n/a".to_string(), |v| format!("{v:.0}%"));
+                    let mut main = Bar::simple(label("GPU"), pct(g.load), g.load.unwrap_or(0.0) / 100.0, GPU);
+                    if g.load.is_none() {
+                        main.hot = false;
+                    }
+                    let mut rows = vec![main];
+                    if g.aux.is_some() || g.load.is_none() {
+                        rows.push(Bar::simple(g.aux_label, pct(g.aux), g.aux.unwrap_or(0.0) / 100.0, GPU));
+                    }
+                    items.push(Item::Bars(rows));
+                }
+            }
+            Kind::Status => items.push(Item::Status),
+            Kind::DockerStatus | Kind::DockerStacks => {
+                if let Some(d) = &s.docker {
+                    items.push(if w.kind == Kind::DockerStatus {
+                        Item::DockerStatus(d)
+                    } else {
+                        Item::DockerStacks(d)
+                    });
+                }
+            }
+        }
+    }
+    items
+}
+
+pub struct PageInfo<'a> {
+    pub page: &'a Page,
+    pub index: usize,
+    pub count: usize,
+}
+
+/// Draw the clock/date header; returns its height.
+fn draw_header(f: &mut Frame, info: &PageInfo, clock: &Clock, portrait: bool) -> i32 {
+    let w = f.width() as i32;
     let margin = 16;
-    let portrait = height > width;
-
-    // --- header: big clock, date, host -----------------------------------
-    let clock_scale = if portrait { 3 } else { 2 };
-    text_scaled(
-        &mut f,
-        &clock.time,
-        w / 2,
-        8,
-        &PROFONT_24_POINT,
-        TEXT,
-        clock_scale,
-    );
-    let clock_h = (PROFONT_24_POINT.character_size.height * clock_scale) as i32;
-    let sub_y = 8 + clock_h + 2;
-    text(
-        &mut f,
-        &clock.date,
-        Point::new(w / 2, sub_y),
-        &PROFONT_14_POINT,
-        MUTED,
-        Alignment::Center,
-    );
-
-    // --- metric rows ------------------------------------------------------
-    let mem_frac = frac(s.mem_used, s.mem_total);
-    let disk_frac = frac(s.disk_used, s.disk_total);
-    let mut rows = vec![
-        Row {
-            label: "CPU",
-            value: format!("{:.0}%", s.cpu_pct),
-            frac: s.cpu_pct / 100.0,
-            color: CPU,
-        },
-        Row {
-            label: "RAM",
-            value: format!("{} / {}", human_bytes(s.mem_used), human_bytes(s.mem_total)),
-            frac: mem_frac,
-            color: RAM,
-        },
-        Row {
-            label: "DISK",
-            value: format!(
-                "{} / {}",
-                human_bytes(s.disk_used),
-                human_bytes(s.disk_total)
-            ),
-            frac: disk_frac,
-            color: DISK,
-        },
-    ];
-    if let Some(t) = s.temp_c {
-        rows.push(Row {
-            label: "TEMP",
-            value: format!("{t:.0}\u{b0}C"),
-            frac: t / 100.0,
-            color: TEMP,
-        });
+    let font = &PROFONT_24_POINT;
+    let cw = char_w(font) * clock.time.chars().count() as i32;
+    let avail = if portrait { w - 2 * margin } else { w / 2 - margin };
+    let scale = [3u32, 2, 1]
+        .into_iter()
+        .find(|&sc| cw * sc as i32 <= avail)
+        .unwrap_or(1);
+    let clock_h = char_h(font) * scale as i32;
+    let indicator = if info.count > 1 {
+        format!("{}/{}", info.index + 1, info.count)
+    } else {
+        String::new()
+    };
+    let name = truncate(&info.page.name, 14);
+    if portrait {
+        text_scaled(f, &clock.time, w / 2, 8, font, TEXT, scale);
+        let sub_y = 8 + clock_h + 2;
+        text(f, &clock.date, Point::new(w / 2, sub_y), &PROFONT_14_POINT, MUTED, Alignment::Center);
+        if info.count > 1 {
+            let small = &PROFONT_12_POINT;
+            let y = sub_y + (char_h(&PROFONT_14_POINT) - char_h(small)) / 2;
+            text(f, &name, Point::new(margin, y), small, MUTED, Alignment::Left);
+            text(f, &indicator, Point::new(w - margin, y), small, MUTED, Alignment::Right);
+        }
+        sub_y + char_h(&PROFONT_14_POINT) + 8
+    } else {
+        text_scaled(f, &clock.time, margin + cw * scale as i32 / 2, 8, font, TEXT, scale);
+        text(f, &clock.date, Point::new(w - margin, 12), &PROFONT_14_POINT, MUTED, Alignment::Right);
+        if info.count > 1 {
+            let small = &PROFONT_12_POINT;
+            let y = 12 + char_h(&PROFONT_14_POINT) + 6;
+            text(f, &format!("{name}  {indicator}"), Point::new(w - margin, y), small, MUTED, Alignment::Right);
+        }
+        8 + clock_h + 6
     }
+}
 
-    let footer_h = 26;
-    let top = sub_y + 30;
-    let avail = h - top - footer_h - 6;
-    let row_h = (avail / rows.len() as i32).min(if portrait { 84 } else { 64 });
-    let label_font = &PROFONT_18_POINT;
-    let bar_h = 12u32;
-    for (i, r) in rows.iter().enumerate() {
-        let y = top + i as i32 * row_h;
-        let color = if r.frac >= 0.9 { WARN } else { r.color };
-        text(
-            &mut f,
-            r.label,
-            Point::new(margin, y),
-            label_font,
-            color,
-            Alignment::Left,
-        );
-        text(
-            &mut f,
-            &r.value,
-            Point::new(w - margin, y),
-            label_font,
-            TEXT,
-            Alignment::Right,
-        );
-        let bar_y = y + label_font.character_size.height as i32 + 4;
-        bar(
-            &mut f,
-            margin,
-            bar_y,
-            (w - 2 * margin) as u32,
-            bar_h,
-            r.frac,
-            color,
-        );
-    }
-
-    // --- footer -------------------------------------------------------------
-    let fy = h - footer_h + 4;
-    let _ = Rectangle::new(
-        Point::new(0, h - footer_h),
-        Size::new(width, footer_h as u32),
-    )
-    .into_styled(PrimitiveStyle::with_fill(PANEL))
-    .draw(&mut f);
+fn draw_status(f: &mut Frame, y: i32, s: &Snapshot, portrait: bool) {
+    let w = f.width() as i32;
+    let _ = Rectangle::new(Point::new(0, y), Size::new(f.width(), STATUS_H as u32))
+        .into_styled(PrimitiveStyle::with_fill(PANEL))
+        .draw(f);
+    let ty = y + 4;
     let left = format!("{}  up {}", s.hostname, human_uptime(s.uptime_s));
     let right = if portrait {
         format!("ld {:.2}", s.load1)
@@ -259,31 +471,164 @@ pub fn dashboard(width: u32, height: u32, s: &Snapshot, clock: &Clock) -> Frame 
             human_rate(s.net_tx_bps)
         )
     };
-    text(
-        &mut f,
-        &left,
-        Point::new(10, fy),
-        &PROFONT_12_POINT,
-        MUTED,
-        Alignment::Left,
-    );
-    text(
-        &mut f,
-        &right,
-        Point::new(w - 10, fy),
-        &PROFONT_12_POINT,
-        MUTED,
-        Alignment::Right,
-    );
-    f
+    let font = &PROFONT_12_POINT;
+    text(f, &left, Point::new(10, ty), font, MUTED, Alignment::Left);
+    text(f, &right, Point::new(w - 10, ty), font, MUTED, Alignment::Right);
 }
 
-fn frac(used: u64, total: u64) -> f32 {
-    if total == 0 {
-        0.0
+const DOCKER_STATUS_H: i32 = 22 + 4 + 2 * 19 + 10;
+
+fn draw_docker_status(f: &mut Frame, x: i32, y: i32, w: i32, d: &DockerStatus) {
+    let title = &PROFONT_18_POINT;
+    let small = &PROFONT_14_POINT;
+    let (state, color) = if d.up() {
+        ("UP", RAM)
     } else {
-        used as f32 / total as f32
+        ("DOWN", WARN)
+    };
+    text(f, "DOCKER", Point::new(x, y), title, if d.up() { DOCKER } else { WARN }, Alignment::Left);
+    text(f, state, Point::new(x + w, y), title, color, Alignment::Right);
+    let y1 = y + char_h(title) + 4;
+    let lh = char_h(small) + 3;
+    if let Some(e) = &d.error {
+        text(f, &truncate(e, (w / char_w(small)) as usize), Point::new(x, y1), small, WARN, Alignment::Left);
+        return;
     }
+    let v = if d.version.is_empty() { String::new() } else { format!("engine {}", d.version) };
+    text(f, &format!("{} / {} containers running", d.running, d.total), Point::new(x, y1), small, TEXT, Alignment::Left);
+    let mut issues = Vec::new();
+    if d.unhealthy > 0 {
+        issues.push(format!("{} unhealthy", d.unhealthy));
+    }
+    if d.restarting > 0 {
+        issues.push(format!("{} restarting", d.restarting));
+    }
+    if d.paused > 0 {
+        issues.push(format!("{} paused", d.paused));
+    }
+    let (line, c) = if issues.is_empty() {
+        (v, MUTED)
+    } else {
+        (issues.join(", "), TEMP)
+    };
+    text(f, &truncate(&line, (w / char_w(small)) as usize), Point::new(x, y1 + lh), small, c, Alignment::Left);
+}
+
+fn draw_docker_stacks(f: &mut Frame, x: i32, y: i32, w: i32, h: i32, d: &DockerStatus) {
+    let title = &PROFONT_18_POINT;
+    let small = &PROFONT_14_POINT;
+    text(f, "STACKS", Point::new(x, y), title, DOCKER, Alignment::Left);
+    let count = if d.up() { format!("{}", d.stacks.len()) } else { "-".into() };
+    text(f, &count, Point::new(x + w, y), title, TEXT, Alignment::Right);
+    let row_h = char_h(small) + 8;
+    let mut ry = y + char_h(title) + 6;
+    if !d.up() || d.stacks.is_empty() {
+        let msg = if d.up() { "no compose stacks running" } else { "docker unavailable" };
+        text(f, msg, Point::new(x, ry), small, MUTED, Alignment::Left);
+        return;
+    }
+    let fit = (((y + h - ry) / row_h).max(1)) as usize;
+    let shown = if d.stacks.len() > fit { fit - 1 } else { fit };
+    for s in d.stacks.iter().take(shown) {
+        let color = if s.running == 0 || s.unhealthy > 0 {
+            WARN
+        } else if s.running < s.total {
+            TEMP
+        } else {
+            RAM
+        };
+        let status = if s.unhealthy > 0 {
+            format!("{}/{} !{}", s.running, s.total, s.unhealthy)
+        } else {
+            format!("{}/{} up", s.running, s.total)
+        };
+        let _ = Rectangle::new(Point::new(x, ry + 4), Size::new(8, 8))
+            .into_styled(PrimitiveStyle::with_fill(color))
+            .draw(f);
+        let max = ((w - 16) / char_w(small)) as usize - status.chars().count() - 1;
+        text(f, &truncate(&s.name, max), Point::new(x + 16, ry), small, TEXT, Alignment::Left);
+        text(f, &status, Point::new(x + w, ry), small, color, Alignment::Right);
+        ry += row_h;
+    }
+    if shown < d.stacks.len() {
+        text(f, &format!("+{} more", d.stacks.len() - shown), Point::new(x, ry), small, MUTED, Alignment::Left);
+    }
+}
+
+/// Draw `info.page` on a `width` x `height` canvas. Portrait canvases get
+/// stacked bars with legends; landscape ones get one-line bars and a
+/// side-by-side header.
+pub fn render_page(
+    width: u32,
+    height: u32,
+    info: &PageInfo,
+    global: &Global,
+    s: &Snapshot,
+    clock: &Clock,
+) -> Frame {
+    let mut f = Frame::new(width, height, BG);
+    let w = width as i32;
+    let h = height as i32;
+    let margin = 16;
+    let cw = w - 2 * margin;
+    let portrait = height > width;
+
+    let header_h = draw_header(&mut f, info, clock, portrait);
+
+    let items = build_items(info.page, global, s);
+    let status_count = items.iter().filter(|i| matches!(i, Item::Status)).count() as i32;
+    let body: Vec<&Item> = items.iter().filter(|i| !matches!(i, Item::Status)).collect();
+
+    let avail = h - header_h - status_count * STATUS_H - 4;
+    let natural = |i: &Item| match i {
+        Item::Bars(b) => bars_height(b, portrait),
+        Item::DockerStatus(_) => DOCKER_STATUS_H,
+        _ => 0,
+    };
+    let flex = body.iter().filter(|i| matches!(i, Item::DockerStacks(_))).count() as i32;
+    let fixed: i32 = body.iter().map(|i| natural(i)).sum();
+    const MIN_FLEX: i32 = 60;
+    let scale = if flex > 0 {
+        ((avail - MIN_FLEX * flex) as f32 / fixed.max(1) as f32).min(1.0)
+    } else {
+        (avail as f32 / fixed.max(1) as f32).min(1.4)
+    }
+    .max(0.0);
+    let flex_h = if flex > 0 {
+        ((avail as f32 - fixed as f32 * scale) / flex as f32) as i32
+    } else {
+        0
+    };
+
+    let mut y = header_h;
+    for item in &body {
+        match item {
+            Item::Bars(bars) => {
+                let nat = bars_height(bars, portrait);
+                let slot = (nat as f32 * scale) as i32;
+                // Centre the rows in their slot so spare space is spread evenly.
+                let mut ry = y + (slot - nat).max(0) / 2;
+                for (i, b) in bars.iter().enumerate() {
+                    ry += draw_bar_row(&mut f, margin, ry, cw, b, style_for(portrait, i));
+                }
+                y += slot.max(nat);
+            }
+            Item::DockerStatus(d) => {
+                draw_docker_status(&mut f, margin, y, cw, d);
+                y += (DOCKER_STATUS_H as f32 * scale) as i32;
+            }
+            Item::DockerStacks(d) => {
+                draw_docker_stacks(&mut f, margin, y, cw, flex_h, d);
+                y += flex_h;
+            }
+            Item::Status => {}
+        }
+    }
+
+    for k in 0..status_count {
+        draw_status(&mut f, h - (k + 1) * STATUS_H, s, portrait);
+    }
+    f
 }
 
 pub fn test_pattern(width: u32, height: u32) -> Frame {
@@ -354,18 +699,52 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_renders_both_orientations() {
+    fn every_page_renders_at_every_rotation_size() {
+        use crate::docker::Stack;
+        use crate::stats::{CpuUsage, MemUsage};
         let s = Snapshot {
-            cpu_pct: 42.0,
-            mem_total: 1,
+            cpu: CpuUsage { busy: 30.0, iowait: 12.0 },
+            mem: MemUsage { total: 16 << 30, apps: 4 << 30, kernel: 1 << 30, cache: 6 << 30 },
             temp_c: Some(55.0),
+            disks: [("/".to_string(), (50u64 << 30, 100u64 << 30))].into(),
+            gpus: vec![crate::gpu::GpuStat {
+                card: "card1".into(),
+                load: Some(40.0),
+                aux: Some(10.0),
+                aux_label: "BLT",
+                vram: None,
+            }],
+            docker: Some(DockerStatus {
+                version: "27.1".into(),
+                total: 20,
+                running: 18,
+                unhealthy: 1,
+                stacks: (0..30)
+                    .map(|i| Stack { name: format!("stack-with-a-long-name-{i}"), running: 2, total: 3, unhealthy: 0 })
+                    .collect(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
-        let c = Clock {
-            time: "12:34".into(),
-            date: "Sat 17 Oct 2026".into(),
-        };
-        assert_eq!(dashboard(480, 320, &s, &c).width(), 480);
-        assert_eq!(dashboard(320, 480, &s, &c).height(), 480);
+        let c = Clock { time: "12:34".into(), date: "Sat 17 Oct 2026".into() };
+        let cfg = crate::config::Config::default();
+        // AX206MON_PREVIEW_DIR=dir cargo test dumps the pages as PNGs.
+        let dump = std::env::var_os("AX206MON_PREVIEW_DIR");
+        for (i, page) in cfg.pages.iter().enumerate() {
+            let info = PageInfo { page, index: i, count: cfg.pages.len() };
+            for (cw, ch) in [(480, 320), (320, 480)] {
+                let f = render_page(cw, ch, &info, &cfg.global, &s, &c);
+                assert_eq!((f.width(), f.height()), (cw, ch));
+                if let Some(d) = &dump {
+                    f.to_rgb_image()
+                        .save(std::path::Path::new(d).join(format!("page{}_{cw}x{ch}.png", i + 1)))
+                        .unwrap();
+                }
+            }
+        }
+        // Docker unreachable / nothing collected must not panic either.
+        let none = Snapshot::default();
+        let info = PageInfo { page: &cfg.pages[1], index: 1, count: 2 };
+        render_page(320, 480, &info, &cfg.global, &none, &c);
     }
 }

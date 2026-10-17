@@ -13,7 +13,8 @@ Restart=on-failure
 RestartSec=10
 
 # Hardening. The process needs: read /proc and /sys, read /etc/ax206mon,
-# and read/write USB device nodes (/dev/bus/usb, char major 189).
+# read/write USB device nodes (/dev/bus/usb, char major 189) and, for the
+# docker pages, access to /var/run/docker.sock (add the user to `docker`).
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -33,7 +34,9 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
-CapabilityBoundingSet=
+# CAP_PERFMON lets the Intel GPU engine counters (i915 PMU) be read.
+AmbientCapabilities=CAP_PERFMON
+CapabilityBoundingSet=CAP_PERFMON
 UMask=0077
 
 [Install]

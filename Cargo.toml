@@ -1,6 +1,6 @@
 [package]
 name = "ax206mon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 # Kept low on purpose so the distro Rust on AlmaLinux 9/10 can build it.
 rust-version = "1.84"
@@ -19,6 +19,7 @@ log = "0.4"
 profont = "0.7"
 rusb = "0.9"
 serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
 signal-hook = "0.3"
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 

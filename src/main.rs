@@ -1,6 +1,8 @@
 mod ax206;
 mod config;
+mod docker;
 mod frame;
+mod gpu;
 mod render;
 mod stats;
 
@@ -23,7 +25,7 @@ use crate::frame::{Frame, Rotation};
     about = "Status dashboard for AX206-protocol USB mini displays (1908:0102)"
 )]
 struct Cli {
-    /// Config file [default: /etc/ax206mon/config.toml if it exists]
+    /// Config file [default: /etc/ax206mon/ax206mon.conf if it exists]
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
 
@@ -66,6 +68,9 @@ enum Command {
         /// What to render
         #[arg(long, value_enum, default_value_t = PreviewKind::Dashboard)]
         kind: PreviewKind,
+        /// Which page to render (1-based)
+        #[arg(long, default_value_t = 1)]
+        page: usize,
     },
 }
 
@@ -101,32 +106,42 @@ fn init_logging(verbose: u8) {
 fn real_main(cli: Cli) -> Result<()> {
     let mut cfg = Config::load(cli.config.as_deref())?;
     if let Some(r) = cli.rotate {
-        cfg.rotate = r;
+        cfg.global.rotate = r;
     }
     if let Some(b) = cli.backlight {
-        cfg.backlight = b;
+        cfg.global.backlight = b;
     }
     if let Some(s) = &cli.size {
-        cfg.size = s.clone();
+        cfg.global.size = s.clone();
     }
     cfg.validate()?;
-    let rot = Rotation::from_degrees(cfg.rotate).expect("validated");
+    let rot = Rotation::from_degrees(cfg.global.rotate).expect("validated");
 
     let open_opts = |backlight: Option<u8>| OpenOptions {
         size: cfg.size(),
         backlight,
-        chunk: cfg.chunk_size,
+        chunk: cfg.global.chunk_size,
     };
 
     match cli.command {
-        Command::Preview { out, kind } => {
+        Command::Preview { out, kind, page } => {
+            if page == 0 || page > cfg.pages.len() {
+                bail!("page must be 1-{}", cfg.pages.len());
+            }
             let (pw, ph) = cfg.size().unwrap_or((480, 320));
             let (w, h) = rot.canvas_size(pw.into(), ph.into());
             let frame = match kind {
                 PreviewKind::Dashboard => {
                     let mut c = stats::Collector::new(stats_opts(&cfg));
+                    let needs = needs_for(&cfg, page - 1);
+                    c.snapshot(&needs); // prime GPU counters
                     std::thread::sleep(Duration::from_millis(500)); // get real CPU/net deltas
-                    render::dashboard(w, h, &c.snapshot(), &render::Clock::now())
+                    let info = render::PageInfo {
+                        page: &cfg.pages[page - 1],
+                        index: page - 1,
+                        count: cfg.pages.len(),
+                    };
+                    render::render_page(w, h, &info, &cfg.global, &c.snapshot(&needs), &render::Clock::now())
                 }
                 PreviewKind::Test => render::test_pattern(w, h),
             };
@@ -146,7 +161,7 @@ fn real_main(cli: Cli) -> Result<()> {
             let d = Display::open(&open_opts(None))?;
             println!("panel: {}x{}", d.width(), d.height());
             let (w, h) = rot.canvas_size(d.width().into(), d.height().into());
-            println!("canvas with rotate={}: {w}x{h}", cfg.rotate);
+            println!("canvas with rotate={}: {w}x{h}", cfg.global.rotate);
             Ok(())
         }
         Command::Brightness { level } => {
@@ -157,26 +172,54 @@ fn real_main(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Test => {
-            let mut d = Display::open(&open_opts(Some(cfg.backlight)))?;
+            let mut d = Display::open(&open_opts(Some(cfg.global.backlight)))?;
             let f = canvas_for(&d, rot, render::test_pattern);
             show(&mut d, &f, rot)
         }
         Command::Image { path } => {
             let img = image::open(&path).with_context(|| format!("opening {}", path.display()))?;
-            let mut d = Display::open(&open_opts(Some(cfg.backlight)))?;
+            let mut d = Display::open(&open_opts(Some(cfg.global.backlight)))?;
             let f = canvas_for(&d, rot, |w, h| render::fit_image(&img, w, h));
             show(&mut d, &f, rot)
         }
-        Command::Run => run(&cfg, rot, open_opts(Some(cfg.backlight))),
+        Command::Run => run(&cfg, rot, open_opts(Some(cfg.global.backlight))),
     }
 }
 
 fn stats_opts(cfg: &Config) -> stats::Options {
+    let g = &cfg.global;
     stats::Options {
-        disk_path: cfg.disk_path.clone(),
-        net_iface: Some(cfg.net_interface.clone()).filter(|s| !s.is_empty()),
-        temp_file: Some(PathBuf::from(&cfg.temp_file)).filter(|p| !p.as_os_str().is_empty()),
+        docker_socket: g.docker_socket.clone(),
+        net_iface: Some(g.net_interface.clone()).filter(|s| !s.is_empty()),
+        temp_file: Some(PathBuf::from(&g.temp_file)).filter(|p| !p.as_os_str().is_empty()),
     }
+}
+
+/// Data sources needed while page `idx` is showing. Filesystems and GPU
+/// counters are collected for every page (GPU load is a delta that must not
+/// span a page's absence); the docker API is only queried on its own pages.
+fn needs_for(cfg: &Config, idx: usize) -> stats::Needs {
+    use config::Kind;
+    let mut n = stats::Needs::default();
+    for p in &cfg.pages {
+        for w in &p.widgets {
+            match w.kind {
+                Kind::Disk => {
+                    let path = w.path.clone().unwrap_or_else(|| cfg.global.disk_path.clone());
+                    if !n.disk_paths.contains(&path) {
+                        n.disk_paths.push(path);
+                    }
+                }
+                Kind::Gpu => n.gpu = true,
+                _ => {}
+            }
+        }
+    }
+    n.docker = cfg.pages[idx]
+        .widgets
+        .iter()
+        .any(|w| matches!(w.kind, Kind::DockerStatus | Kind::DockerStacks));
+    n
 }
 
 fn canvas_for(d: &Display, rot: Rotation, draw: impl FnOnce(u32, u32) -> Frame) -> Frame {
@@ -198,9 +241,11 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
         signal_hook::flag::register(sig, Arc::clone(&stop)).context("installing signal handler")?;
     }
 
-    let interval = Duration::from_secs_f64(cfg.interval);
+    let interval = Duration::from_secs_f64(cfg.global.refresh_interval);
     let mut collector = stats::Collector::new(stats_opts(cfg));
     let mut reported_missing = false;
+    let mut page = 0usize;
+    let mut page_since = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
         let mut d = match Display::open(&opts) {
@@ -221,16 +266,26 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
         let (w, h) = rot.canvas_size(d.width().into(), d.height().into());
         while !stop.load(Ordering::Relaxed) {
             let started = Instant::now();
-            let frame = render::dashboard(w, h, &collector.snapshot(), &render::Clock::now());
+            if page_since.elapsed().as_secs_f64() >= cfg.page_duration(page) {
+                page = (page + 1) % cfg.pages.len();
+                page_since = started;
+            }
+            let info = render::PageInfo {
+                page: &cfg.pages[page],
+                index: page,
+                count: cfg.pages.len(),
+            };
+            let snap = collector.snapshot(&needs_for(cfg, page));
+            let frame = render::render_page(w, h, &info, &cfg.global, &snap, &render::Clock::now());
             if let Err(e) = show(&mut d, &frame, rot) {
                 warn!("lost the display: {e:#}");
                 break;
             }
-            log::debug!("frame sent in {:?}", started.elapsed());
+            log::debug!("page {} sent in {:?}", page + 1, started.elapsed());
             sleep_unless_stopped(interval.saturating_sub(started.elapsed()), &stop);
         }
 
-        if stop.load(Ordering::Relaxed) && cfg.backlight_off_on_exit {
+        if stop.load(Ordering::Relaxed) && cfg.global.backlight_off_on_exit {
             let _ = d.set_backlight(0);
         }
     }
