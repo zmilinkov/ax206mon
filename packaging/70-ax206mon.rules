@@ -1,0 +1,7 @@
+# AX206-protocol USB display (QDtech "USB-Display", 1908:0102).
+# - group ax206mon (the service user) may read/write the device node
+# - uaccess: the user logged in at the local seat also gets access, which is
+#   handy for development on a desktop
+# - keep it out of USB autosuspend
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="1908", ATTR{idProduct}=="0102", \
+  MODE="0660", GROUP="ax206mon", TAG+="uaccess", ATTR{power/control}="on"

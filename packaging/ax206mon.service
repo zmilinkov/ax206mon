@@ -1,0 +1,40 @@
+[Unit]
+Description=Status dashboard on an AX206 USB mini display
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ax206mon run
+User=ax206mon
+Group=ax206mon
+# The program itself waits for the display and survives unplugging;
+# this only covers crashes and config errors.
+Restart=on-failure
+RestartSec=10
+
+# Hardening. The process needs: read /proc and /sys, read /etc/ax206mon,
+# and read/write USB device nodes (/dev/bus/usb, char major 189).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+DevicePolicy=closed
+DeviceAllow=char-usb_device rw
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,4 @@
+# When Cargo.lock is (re)generated, prefer dependency versions that still
+# build with `rust-version` from Cargo.toml (the distro Rust on AlmaLinux).
+[resolver]
+incompatible-rust-versions = "fallback"
