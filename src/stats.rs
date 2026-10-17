@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use crate::docker::{self, DockerStatus};
 use crate::gpu::{self, GpuStat};
+use crate::services::{self, ServiceList};
 
 /// CPU time split since the previous snapshot, each 0..=100.
 #[derive(Clone, Copy, Debug, Default)]
@@ -51,6 +52,8 @@ pub struct Snapshot {
     pub gpus: Vec<GpuStat>,
     /// Only filled when the current page has a docker widget.
     pub docker: Option<DockerStatus>,
+    /// Only filled when the current page has a services widget.
+    pub services: Option<ServiceList>,
     pub temp_c: Option<f32>,
     pub load1: f32,
     pub uptime_s: u64,
@@ -65,6 +68,7 @@ pub struct Needs {
     /// GPU counters are deltas, so this must cover every page, not just the current one.
     pub gpu: bool,
     pub docker: bool,
+    pub services: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -140,6 +144,7 @@ impl Collector {
             docker: needs
                 .docker
                 .then(|| docker::query(&self.opts.docker_socket)),
+            services: needs.services.then(services::query),
             temp_c: self.temp_file.as_deref().and_then(read_millideg),
             load1: loadavg().unwrap_or(0.0),
             uptime_s: uptime().unwrap_or(0),

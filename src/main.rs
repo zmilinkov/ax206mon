@@ -4,6 +4,7 @@ mod docker;
 mod frame;
 mod gpu;
 mod render;
+mod services;
 mod stats;
 
 use std::path::PathBuf;
@@ -197,7 +198,7 @@ fn stats_opts(cfg: &Config) -> stats::Options {
 
 /// Data sources needed while page `idx` is showing. Filesystems and GPU
 /// counters are collected for every page (GPU load is a delta that must not
-/// span a page's absence); the docker API is only queried on its own pages.
+/// span a page's absence); the docker API and systemctl are only queried on their own pages.
 fn needs_for(cfg: &Config, idx: usize) -> stats::Needs {
     use config::Kind;
     let mut n = stats::Needs::default();
@@ -215,10 +216,9 @@ fn needs_for(cfg: &Config, idx: usize) -> stats::Needs {
             }
         }
     }
-    n.docker = cfg.pages[idx]
-        .widgets
-        .iter()
-        .any(|w| matches!(w.kind, Kind::DockerStatus | Kind::DockerStacks));
+    let on_page = |f: fn(Kind) -> bool| cfg.pages[idx].widgets.iter().any(|w| f(w.kind));
+    n.docker = on_page(|k| matches!(k, Kind::DockerStatus | Kind::DockerStacks));
+    n.services = on_page(|k| k == Kind::Services);
     n
 }
 
