@@ -405,8 +405,8 @@ fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a
                         main.hot = false;
                     }
                     let mut rows = vec![main];
-                    if g.aux.is_some() || g.load.is_none() {
-                        rows.push(Bar::simple(g.aux_label, pct(g.aux), g.aux.unwrap_or(0.0) / 100.0, GPU));
+                    for r in &g.rows {
+                        rows.push(Bar::simple(r.label, pct(r.pct), r.pct.unwrap_or(0.0) / 100.0, GPU));
                     }
                     items.push(Item::Bars(rows));
                 }
@@ -875,8 +875,10 @@ mod tests {
             gpus: vec![crate::gpu::GpuStat {
                 card: "card1".into(),
                 load: Some(40.0),
-                aux: Some(10.0),
-                aux_label: "BLT",
+                rows: vec![
+                    crate::gpu::GpuRow { label: "CMP", pct: Some(70.0) },
+                    crate::gpu::GpuRow { label: "BLT", pct: Some(10.0) },
+                ],
                 vram: None,
             }],
             interfaces: Some(crate::netif::list()),

@@ -62,6 +62,8 @@ enum Command {
     Test,
     /// Show an image file (PNG or JPEG), scaled to fit
     Image { path: PathBuf },
+    /// Print the detected GPUs and their engine loads over one second
+    Gpu,
     /// Set the backlight level 0-7 and exit
     Brightness { level: u8 },
     /// Render to a PNG file instead of the display (no hardware needed)
@@ -160,6 +162,22 @@ fn real_main(cli: Cli) -> Result<()> {
                 frame.height(),
                 out.display()
             );
+            Ok(())
+        }
+        Command::Gpu => {
+            let mut probes = gpu::discover();
+            if probes.is_empty() {
+                println!("no supported GPU found (Radeon: amdgpu, Intel: i915)");
+            }
+            for p in &mut probes {
+                p.report(); // prime the delta counters
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            for p in &mut probes {
+                for line in p.report() {
+                    println!("{line}");
+                }
+            }
             Ok(())
         }
         Command::Info => {

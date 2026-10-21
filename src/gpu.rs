@@ -2,9 +2,10 @@
 //!
 //! * Radeon: `gpu_busy_percent` (graphics pipe), `mem_busy_percent` (memory
 //!   controller activity, newer kernels) or VRAM fill as fallback.
-//! * Intel: the i915 perf PMU exposes busy time per engine; we show the
-//!   render engine and the blitter (copy) engine. Opening a PMU counter needs
-//!   CAP_PERFMON (the systemd unit grants it) or perf_event_paranoid <= 0.
+//! * Intel: the i915 perf PMU exposes busy time per engine. The main bar is
+//!   the busier of the render (rcs) and compute (ccs, Arc) engines, with
+//!   extra rows for compute and the blitter (bcs). Opening a PMU counter
+//!   needs CAP_PERFMON (the systemd unit grants it) or perf_event_paranoid <= 0.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,12 +15,17 @@ use std::time::Instant;
 pub struct GpuStat {
     /// DRM card name, e.g. "card1".
     pub card: String,
-    /// Graphics/render engine load, 0..=100.
+    /// Main load, 0..=100: graphics pipe (Radeon) or busiest render/compute engine (Intel).
     pub load: Option<f32>,
-    /// Second bar: blitter load (Intel) or memory activity / VRAM fill (Radeon).
-    pub aux: Option<f32>,
-    pub aux_label: &'static str,
+    /// Secondary bars drawn under the main one.
+    pub rows: Vec<GpuRow>,
     pub vram: Option<(u64, u64)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GpuRow {
+    pub label: &'static str,
+    pub pct: Option<f32>,
 }
 
 pub struct Probe {
@@ -31,7 +37,7 @@ pub struct Probe {
 
 enum Kind {
     Amd,
-    Intel { render: Option<Counter>, blitter: Option<Counter> },
+    Intel(Vec<Engine>),
 }
 
 pub fn discover() -> Vec<Probe> {
@@ -63,10 +69,14 @@ pub fn discover() -> Vec<Probe> {
                     .ok()
                     .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
                     .unwrap_or_default();
-                let (render, blitter) = open_i915(&slot);
+                let engines = open_i915(&slot);
+                log::info!(
+                    "{card}: i915 engines {:?}",
+                    engines.iter().map(|e| e.name.as_str()).collect::<Vec<_>>()
+                );
                 Probe {
                     name: "Intel".into(),
-                    kind: Kind::Intel { render, blitter },
+                    kind: Kind::Intel(engines),
                     card,
                     dev,
                 }
@@ -87,7 +97,6 @@ impl Probe {
     pub fn read(&mut self) -> GpuStat {
         let mut s = GpuStat {
             card: self.card.clone(),
-            aux_label: "MEM",
             ..Default::default()
         };
         match &mut self.kind {
@@ -96,20 +105,67 @@ impl Probe {
                 let used = read_num::<u64>(&self.dev.join("mem_info_vram_used"));
                 let total = read_num::<u64>(&self.dev.join("mem_info_vram_total"));
                 s.vram = used.zip(total).filter(|&(_, t)| t > 0);
-                s.aux = read_num(&self.dev.join("mem_busy_percent"));
-                if s.aux.is_none() {
-                    s.aux = s.vram.map(|(u, t)| 100.0 * u as f32 / t as f32);
-                    s.aux_label = "VRAM";
-                }
+                let mem = read_num(&self.dev.join("mem_busy_percent"));
+                s.rows.push(match mem {
+                    Some(m) => GpuRow { label: "MEM", pct: Some(m) },
+                    None => GpuRow {
+                        label: "VRAM",
+                        pct: s.vram.map(|(u, t)| 100.0 * u as f32 / t as f32),
+                    },
+                });
             }
-            Kind::Intel { render, blitter } => {
-                s.aux_label = "BLT";
-                s.load = render.as_mut().and_then(Counter::busy_pct);
-                s.aux = blitter.as_mut().and_then(Counter::busy_pct);
+            Kind::Intel(engines) => {
+                let by_class = read_classes(engines);
+                let get = |c: &str| by_class.iter().find(|(k, _)| k == c).map(|(_, v)| *v);
+                let (render, compute, blitter) = (get("rcs"), get("ccs"), get("bcs"));
+                s.load = [render, compute].into_iter().flatten().reduce(f32::max);
+                if let Some(c) = compute {
+                    s.rows.push(GpuRow { label: "CMP", pct: Some(c) });
+                }
+                if let Some(b) = blitter {
+                    s.rows.push(GpuRow { label: "BLT", pct: Some(b) });
+                }
             }
         }
         s
     }
+
+    /// One line per engine/counter with its current load, for `ax206mon gpu`.
+    pub fn report(&mut self) -> Vec<String> {
+        let mut out = vec![format!("{} ({})", self.card, self.name)];
+        match &mut self.kind {
+            Kind::Amd => {
+                let s = self.read();
+                out.push(format!("  graphics busy: {:?}", s.load));
+                for r in &s.rows {
+                    out.push(format!("  {}: {:?}", r.label, r.pct));
+                }
+            }
+            Kind::Intel(engines) => {
+                if engines.is_empty() {
+                    out.push("  no engine counters could be opened".into());
+                }
+                for e in engines.iter_mut() {
+                    out.push(format!("  {}: {:?}", e.name, e.counter.busy_pct()));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Busiest engine per class ("rcs", "ccs", ...); engines whose counter
+/// can't be read yet are skipped.
+fn read_classes(engines: &mut [Engine]) -> Vec<(String, f32)> {
+    let mut out: Vec<(String, f32)> = Vec::new();
+    for e in engines {
+        let Some(p) = e.counter.busy_pct() else { continue };
+        match out.iter_mut().find(|(c, _)| *c == e.class) {
+            Some((_, v)) => *v = v.max(p),
+            None => out.push((e.class.clone(), p)),
+        }
+    }
+    out
 }
 
 fn read_trim(p: &Path) -> String {
@@ -161,7 +217,20 @@ struct PerfAttr {
     rest: [u64; 12],
 }
 
-fn open_i915(slot: &str) -> (Option<Counter>, Option<Counter>) {
+/// One i915 engine ("rcs0", "ccs1", ...) and its busy counter.
+struct Engine {
+    name: String,
+    /// Engine class without the instance number ("rcs", "ccs", "bcs", "vcs", "vecs").
+    class: String,
+    counter: Counter,
+}
+
+fn engine_class(name: &str) -> String {
+    name.trim_end_matches(|c: char| c.is_ascii_digit()).to_string()
+}
+
+/// Open a busy counter for every engine the i915 PMU advertises.
+fn open_i915(slot: &str) -> Vec<Engine> {
     // The first i915 device is plain "i915"; others are "i915_0000_03_00.0".
     let specific = format!("i915_{}", slot.replace(':', "_"));
     let base = [specific.as_str(), "i915"]
@@ -170,14 +239,28 @@ fn open_i915(slot: &str) -> (Option<Counter>, Option<Counter>) {
         .find(|p| p.join("type").exists());
     let Some(base) = base else {
         log::warn!("i915 PMU not available; Intel GPU load disabled");
-        return (None, None);
+        return Vec::new();
     };
     let Some(pmu_type) = read_num::<u32>(&base.join("type")) else {
-        return (None, None);
+        return Vec::new();
     };
-    let open = |event: &str| -> Option<Counter> {
-        let spec = read_trim(&base.join("events").join(event));
-        let config = u64::from_str_radix(spec.strip_prefix("config=0x")?, 16).ok()?;
+    let mut names: Vec<String> = fs::read_dir(base.join("events"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|n| n.strip_suffix("-busy").map(str::to_string))
+        .collect();
+    names.sort();
+    let mut out = Vec::new();
+    for name in names {
+        let spec = read_trim(&base.join("events").join(format!("{name}-busy")));
+        let Some(config) = spec
+            .strip_prefix("config=0x")
+            .and_then(|h| u64::from_str_radix(h, 16).ok())
+        else {
+            continue;
+        };
         let attr = PerfAttr {
             type_: pmu_type,
             size: std::mem::size_of::<PerfAttr>() as u32,
@@ -188,16 +271,16 @@ fn open_i915(slot: &str) -> (Option<Counter>, Option<Counter>) {
         let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, -1, 0, -1, 8u64) } as i32;
         if fd < 0 {
             log::warn!(
-                "perf_event_open({event}) failed: {} (needs CAP_PERFMON or perf_event_paranoid <= 0)",
+                "perf_event_open({name}-busy) failed: {} (needs CAP_PERFMON or perf_event_paranoid <= 0)",
                 std::io::Error::last_os_error()
             );
-            return None;
+            continue;
         }
-        let mut c = Counter { fd, prev: None };
-        c.busy_pct(); // prime
-        Some(c)
-    };
-    (open("rcs0-busy"), open("bcs0-busy"))
+        let mut counter = Counter { fd, prev: None };
+        counter.busy_pct(); // prime
+        out.push(Engine { class: engine_class(&name), name, counter });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -207,6 +290,13 @@ mod tests {
     #[test]
     fn perf_attr_is_ver5_sized() {
         assert_eq!(std::mem::size_of::<PerfAttr>(), 112);
+    }
+
+    #[test]
+    fn engine_classes() {
+        assert_eq!(engine_class("rcs0"), "rcs");
+        assert_eq!(engine_class("ccs3"), "ccs");
+        assert_eq!(engine_class("vecs1"), "vecs");
     }
 
     #[test]
