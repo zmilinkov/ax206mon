@@ -36,6 +36,13 @@ per page listing its widgets. Pass another file with `-c`.
 
 Preview a page without hardware: `ax206mon preview --page 2 out.png`.
 
+## Screen protection
+
+The `[burnin]` table helps against LCD image retention from the static clock:
+a night schedule (backlight off or dimmed between two times), a header that
+shifts position/colour per page and/or over time, and an optional periodic
+full-screen colour refresh. See `packaging/ax206mon.conf`.
+
 ## Notes
 
 * Docker pages need access to the socket: `usermod -aG docker ax206mon`.

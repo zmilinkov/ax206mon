@@ -1,4 +1,5 @@
 mod ax206;
+mod burnin;
 mod config;
 mod docker;
 mod frame;
@@ -138,12 +139,14 @@ fn real_main(cli: Cli) -> Result<()> {
                     let needs = needs_for(&cfg, page - 1);
                     c.snapshot(&needs); // prime GPU counters
                     std::thread::sleep(Duration::from_millis(500)); // get real CPU/net deltas
+                    let clock = render::Clock::now();
                     let info = render::PageInfo {
                         page: &cfg.pages[page - 1],
                         index: page - 1,
                         count: cfg.pages.len(),
+                        variant: variant_for(&cfg, page - 1, &clock),
                     };
-                    render::render_page(w, h, &info, &cfg.global, &c.snapshot(&needs), &render::Clock::now())
+                    render::render_page(w, h, &info, &cfg.global, &c.snapshot(&needs), &clock)
                 }
                 PreviewKind::Test => render::test_pattern(w, h),
             };
@@ -248,9 +251,17 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
     let mut reported_missing = false;
     let mut page = 0usize;
     let mut page_since = Instant::now();
+    let refresh_every = (cfg.burnin.idle_refresh_hours > 0.0)
+        .then(|| Duration::from_secs_f64(cfg.burnin.idle_refresh_hours * 3600.0));
+    let mut last_refresh = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
-        let mut d = match Display::open(&opts) {
+        let mut level = backlight_for(cfg, render::Clock::now().minute_of_day);
+        let open = OpenOptions {
+            backlight: Some(level),
+            ..opts.clone()
+        };
+        let mut d = match Display::open(&open) {
             Ok(d) => {
                 reported_missing = false;
                 d
@@ -268,6 +279,35 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
         let (w, h) = rot.canvas_size(d.width().into(), d.height().into());
         while !stop.load(Ordering::Relaxed) {
             let started = Instant::now();
+            let clock = render::Clock::now();
+
+            // Night schedule: dim, or switch off and stop redrawing.
+            let want = backlight_for(cfg, clock.minute_of_day);
+            if want != level {
+                info!("backlight {level} -> {want}");
+                if let Err(e) = d.set_backlight(want) {
+                    warn!("lost the display: {e}");
+                    break;
+                }
+                level = want;
+            }
+
+            // Periodic full-screen colour cycle against image retention.
+            if refresh_every.is_some_and(|every| last_refresh.elapsed() >= every) {
+                info!("running idle refresh cycle");
+                if let Err(e) = refresh_cycle(&mut d, rot, w, h, cfg.burnin.idle_refresh_seconds, &stop) {
+                    warn!("lost the display: {e:#}");
+                    break;
+                }
+                last_refresh = Instant::now();
+                continue;
+            }
+
+            if night_dark(cfg, clock.minute_of_day) {
+                sleep_unless_stopped(Duration::from_secs(10), &stop);
+                continue;
+            }
+
             if page_since.elapsed().as_secs_f64() >= cfg.page_duration(page) {
                 page = (page + 1) % cfg.pages.len();
                 page_since = started;
@@ -276,9 +316,10 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
                 page: &cfg.pages[page],
                 index: page,
                 count: cfg.pages.len(),
+                variant: variant_for(cfg, page, &clock),
             };
             let snap = collector.snapshot(&needs_for(cfg, page));
-            let frame = render::render_page(w, h, &info, &cfg.global, &snap, &render::Clock::now());
+            let frame = render::render_page(w, h, &info, &cfg.global, &snap, &clock);
             if let Err(e) = show(&mut d, &frame, rot) {
                 warn!("lost the display: {e:#}");
                 break;
@@ -292,6 +333,54 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
         }
     }
     info!("stopped");
+    Ok(())
+}
+
+/// Backlight level wanted at `minute_of_day`: the night level inside the
+/// configured night window, otherwise the normal one.
+fn backlight_for(cfg: &Config, minute_of_day: u32) -> u8 {
+    match cfg.burnin.night_window() {
+        Some((s, e)) if burnin::in_window(s, e, minute_of_day) => cfg.burnin.night_backlight,
+        _ => cfg.global.backlight,
+    }
+}
+
+/// In the night window with the backlight off: nothing visible to draw.
+fn night_dark(cfg: &Config, minute_of_day: u32) -> bool {
+    cfg.burnin.night_backlight == 0
+        && cfg
+            .burnin
+            .night_window()
+            .is_some_and(|(s, e)| burnin::in_window(s, e, minute_of_day))
+}
+
+fn variant_for(cfg: &Config, page: usize, clock: &render::Clock) -> usize {
+    burnin::header_variant(
+        cfg.burnin.header_variation,
+        page,
+        clock.epoch_minutes,
+        cfg.burnin.header_variation_minutes,
+    )
+}
+
+/// Flash black, white and the primaries full-screen for `secs` seconds.
+fn refresh_cycle(
+    d: &mut Display,
+    rot: Rotation,
+    w: u32,
+    h: u32,
+    secs: f64,
+    stop: &AtomicBool,
+) -> Result<()> {
+    use embedded_graphics::pixelcolor::Rgb888;
+    use embedded_graphics::prelude::RgbColor;
+    let colors = [Rgb888::BLACK, Rgb888::WHITE, Rgb888::RED, Rgb888::GREEN, Rgb888::BLUE];
+    let end = Instant::now() + Duration::from_secs_f64(secs);
+    let mut i = 0;
+    while Instant::now() < end && !stop.load(Ordering::Relaxed) {
+        show(d, &Frame::new(w, h, colors[i % colors.len()]), rot)?;
+        i += 1;
+    }
     Ok(())
 }
 
