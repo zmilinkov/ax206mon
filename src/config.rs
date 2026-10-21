@@ -14,6 +14,7 @@ pub const DEFAULT_PATH: &str = "/etc/ax206mon/ax206mon.conf";
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub global: Global,
+    pub burnin: Burnin,
     /// Dashboard pages, shown in order. Defaults to the built-in pages.
     #[serde(rename = "page")]
     pub pages: Vec<Page>,
@@ -44,6 +45,49 @@ pub struct Global {
     pub size: String,
     /// Frame data chunk size in bytes (Windows driver uses 262144).
     pub chunk_size: usize,
+}
+
+/// Screen-protection options: night backlight, header variation, idle refresh.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Burnin {
+    /// Night window start "HH:MM" (local time); empty = no night schedule.
+    pub night_start: String,
+    /// Night window end "HH:MM".
+    pub night_end: String,
+    /// Backlight level during the night window: 0 = off, 1-7 = dimmed.
+    pub night_backlight: u8,
+    /// How the clock header varies: off, page, time or both.
+    pub header_variation: crate::burnin::Variation,
+    /// Minutes between header changes for `time` / `both`.
+    pub header_variation_minutes: f64,
+    /// Hours between full-screen refresh cycles; 0 = never.
+    pub idle_refresh_hours: f64,
+    /// Seconds a refresh cycle lasts.
+    pub idle_refresh_seconds: f64,
+}
+
+impl Default for Burnin {
+    fn default() -> Self {
+        Self {
+            night_start: String::new(),
+            night_end: String::new(),
+            night_backlight: 0,
+            header_variation: Default::default(),
+            header_variation_minutes: 30.0,
+            idle_refresh_hours: 0.0,
+            idle_refresh_seconds: 10.0,
+        }
+    }
+}
+
+impl Burnin {
+    /// Night window as minutes-since-midnight, if configured (validated).
+    pub fn night_window(&self) -> Option<(u32, u32)> {
+        let s = crate::burnin::parse_hhmm(&self.night_start)?;
+        let e = crate::burnin::parse_hhmm(&self.night_end)?;
+        Some((s, e))
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -203,6 +247,7 @@ impl Default for Config {
         let w = |kinds: &[Kind]| kinds.iter().map(|&k| Widget::new(k)).collect();
         Self {
             global: Global::default(),
+            burnin: Burnin::default(),
             pages: vec![
                 Page {
                     name: "System".into(),
@@ -265,6 +310,34 @@ impl Config {
         }
         if !(1.0..=86_400.0).contains(&g.page_duration) {
             bail!("global.page_duration must be between 1 and 86400 seconds");
+        }
+        let b = &self.burnin;
+        match (b.night_start.is_empty(), b.night_end.is_empty()) {
+            (true, true) => {}
+            (false, false) => {
+                let (s, e) = (
+                    crate::burnin::parse_hhmm(&b.night_start),
+                    crate::burnin::parse_hhmm(&b.night_end),
+                );
+                match (s, e) {
+                    (Some(s), Some(e)) if s != e => {}
+                    (Some(_), Some(_)) => bail!("burnin.night_start and night_end must differ"),
+                    _ => bail!("burnin.night_start/night_end must look like \"23:00\""),
+                }
+            }
+            _ => bail!("burnin.night_start and night_end must be set together"),
+        }
+        if b.night_backlight > 7 {
+            bail!("burnin.night_backlight must be 0-7 (got {})", b.night_backlight);
+        }
+        if !(1.0..=1440.0).contains(&b.header_variation_minutes) {
+            bail!("burnin.header_variation_minutes must be between 1 and 1440");
+        }
+        if b.idle_refresh_hours != 0.0 && !(0.1..=168.0).contains(&b.idle_refresh_hours) {
+            bail!("burnin.idle_refresh_hours must be 0 (off) or between 0.1 and 168");
+        }
+        if !(1.0..=600.0).contains(&b.idle_refresh_seconds) {
+            bail!("burnin.idle_refresh_seconds must be between 1 and 600");
         }
         if self.pages.is_empty() {
             bail!("at least one [[page]] is required");
@@ -374,6 +447,28 @@ mod tests {
         )
         .unwrap();
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn burnin_defaults_and_validation() {
+        let d = Config::default();
+        d.validate().unwrap();
+        assert!(d.burnin.night_window().is_none());
+        let c: Config = toml::from_str(
+            "[burnin]\nnight_start = \"23:00\"\nnight_end = \"07:00\"\nheader_variation = \"page\"",
+        )
+        .unwrap();
+        c.validate().unwrap();
+        assert_eq!(c.burnin.night_window(), Some((23 * 60, 7 * 60)));
+        for bad in [
+            "[burnin]\nnight_start = \"23:00\"",
+            "[burnin]\nnight_start = \"25:00\"\nnight_end = \"07:00\"",
+            "[burnin]\nnight_start = \"07:00\"\nnight_end = \"07:00\"",
+            "[burnin]\nidle_refresh_hours = 0.01",
+        ] {
+            let c: Config = toml::from_str(bad).unwrap();
+            assert!(c.validate().is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -31,9 +31,14 @@ pub mod palette {
 use palette::*;
 
 /// Wall-clock time to show; passed in so rendering is testable.
+#[derive(Default)]
 pub struct Clock {
     pub time: String,
     pub date: String,
+    /// Minutes since local midnight (for the night schedule).
+    pub minute_of_day: u32,
+    /// Minutes since the Unix epoch (for time-based header variation).
+    pub epoch_minutes: u64,
 }
 
 impl Clock {
@@ -47,6 +52,8 @@ impl Clock {
             "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
         ];
         Clock {
+            minute_of_day: (tm.tm_hour * 60 + tm.tm_min).clamp(0, 1439) as u32,
+            epoch_minutes: t.max(0) as u64 / 60,
             time: format!("{:02}:{:02}", tm.tm_hour, tm.tm_min),
             date: format!(
                 "{} {} {} {}",
@@ -448,6 +455,33 @@ pub struct PageInfo<'a> {
     pub page: &'a Page,
     pub index: usize,
     pub count: usize,
+    /// Header look, 0..burnin::VARIANTS (see burnin::header_variant).
+    pub variant: usize,
+}
+
+/// Largest vertical shift a header variant applies; always reserved so the
+/// widgets below never move.
+const HEADER_DY_MAX: i32 = 6;
+
+/// Clock colours cycled by header variants; all stay light for contrast.
+const CLOCK_COLORS: [Rgb888; crate::burnin::VARIANTS] = [
+    TEXT,
+    Rgb888::new(0xbc, 0xd8, 0xff),
+    Rgb888::new(0xff, 0xe3, 0xb8),
+    Rgb888::new(0xc6, 0xf3, 0xdd),
+];
+
+/// (dx, dy, colour) for header variant `v`; dx is limited by the free
+/// horizontal space `slack` so nothing leaves the screen.
+fn header_look(v: usize, portrait: bool, slack: i32) -> (i32, i32, Rgb888) {
+    let v = v % crate::burnin::VARIANTS;
+    let unit = slack.clamp(0, 12);
+    let dx = if portrait {
+        [0, -unit, 0, unit][v]
+    } else {
+        [0, unit / 2, unit, unit / 2][v]
+    };
+    (dx, [0, 2, 4, 6][v], CLOCK_COLORS[v])
 }
 
 /// Draw the clock/date header; returns its height.
@@ -468,26 +502,28 @@ fn draw_header(f: &mut Frame, info: &PageInfo, clock: &Clock, portrait: bool) ->
         String::new()
     };
     let name = truncate(&info.page.name, 14);
+    let slack = avail - cw * scale as i32;
+    let (dx, dy, clock_color) = header_look(info.variant, portrait, slack / 2);
     if portrait {
-        text_scaled(f, &clock.time, w / 2, 8, font, TEXT, scale);
-        let sub_y = 8 + clock_h + 2;
-        text(f, &clock.date, Point::new(w / 2, sub_y), &PROFONT_14_POINT, MUTED, Alignment::Center);
+        text_scaled(f, &clock.time, w / 2 + dx, 8 + dy, font, clock_color, scale);
+        let sub_y = 8 + dy + clock_h + 2;
+        text(f, &clock.date, Point::new(w / 2 + dx, sub_y), &PROFONT_14_POINT, MUTED, Alignment::Center);
         if info.count > 1 {
             let small = &PROFONT_12_POINT;
             let y = sub_y + (char_h(&PROFONT_14_POINT) - char_h(small)) / 2;
             text(f, &name, Point::new(margin, y), small, MUTED, Alignment::Left);
             text(f, &indicator, Point::new(w - margin, y), small, MUTED, Alignment::Right);
         }
-        sub_y + char_h(&PROFONT_14_POINT) + 8
+        8 + HEADER_DY_MAX + clock_h + 2 + char_h(&PROFONT_14_POINT) + 8
     } else {
-        text_scaled(f, &clock.time, margin + cw * scale as i32 / 2, 8, font, TEXT, scale);
+        text_scaled(f, &clock.time, margin + dx + cw * scale as i32 / 2, 8 + dy, font, clock_color, scale);
         text(f, &clock.date, Point::new(w - margin, 12), &PROFONT_14_POINT, MUTED, Alignment::Right);
         if info.count > 1 {
             let small = &PROFONT_12_POINT;
             let y = 12 + char_h(&PROFONT_14_POINT) + 6;
             text(f, &format!("{name}  {indicator}"), Point::new(w - margin, y), small, MUTED, Alignment::Right);
         }
-        8 + clock_h + 6
+        8 + HEADER_DY_MAX + clock_h + 6
     }
 }
 
@@ -862,12 +898,12 @@ mod tests {
             }),
             ..Default::default()
         };
-        let c = Clock { time: "12:34".into(), date: "Sat 17 Oct 2026".into() };
+        let c = Clock { time: "12:34".into(), date: "Sat 17 Oct 2026".into(), ..Default::default() };
         let cfg = crate::config::Config::default();
         // AX206MON_PREVIEW_DIR=dir cargo test dumps the pages as PNGs.
         let dump = std::env::var_os("AX206MON_PREVIEW_DIR");
         for (i, page) in cfg.pages.iter().enumerate() {
-            let info = PageInfo { page, index: i, count: cfg.pages.len() };
+            let info = PageInfo { page, index: i, count: cfg.pages.len(), variant: i };
             for (cw, ch) in [(480, 320), (320, 480)] {
                 let f = render_page(cw, ch, &info, &cfg.global, &s, &c);
                 assert_eq!((f.width(), f.height()), (cw, ch));
@@ -878,10 +914,22 @@ mod tests {
                 }
             }
         }
+        // Every header variant renders at both sizes (dumped for a visual check).
+        for v in 0..crate::burnin::VARIANTS {
+            for (cw, ch) in [(480, 320), (320, 480)] {
+                let info = PageInfo { page: &cfg.pages[0], index: 0, count: cfg.pages.len(), variant: v };
+                let f = render_page(cw, ch, &info, &cfg.global, &s, &c);
+                if let Some(d) = &dump {
+                    f.to_rgb_image()
+                        .save(std::path::Path::new(d).join(format!("variant{v}_{cw}x{ch}.png")))
+                        .unwrap();
+                }
+            }
+        }
         // Docker unreachable / nothing collected must not panic either.
         let none = Snapshot::default();
         for i in 0..cfg.pages.len() {
-            let info = PageInfo { page: &cfg.pages[i], index: i, count: cfg.pages.len() };
+            let info = PageInfo { page: &cfg.pages[i], index: i, count: cfg.pages.len(), variant: i };
             render_page(320, 480, &info, &cfg.global, &none, &c);
         }
     }
