@@ -487,7 +487,6 @@ fn draw_header(f: &mut Frame, info: &PageInfo, clock: &Clock, portrait: bool) ->
     let max_px = if portrait { 80.0 } else { 54.0 } * font::scale();
     let clock_font = font::Font::px(font::fit_px(avail, clock.time.chars().count(), max_px));
     let cw = clock_font.w() * clock.time.chars().count() as i32;
-    let clock_h = clock_font.h();
     let indicator = if info.count > 1 {
         format!("{}/{}", info.index + 1, info.count)
     } else {
@@ -499,26 +498,33 @@ fn draw_header(f: &mut Frame, info: &PageInfo, clock: &Clock, portrait: bool) ->
     let date_w = char_w(TextSize::Mid) * clock.date.chars().count() as i32;
     let name_room = (w / 2 + dx - date_w / 2 - margin - 6) / char_w(TextSize::Small).max(1);
     let name = truncate(&info.page.name, if portrait { name_room.clamp(1, 14) as usize } else { 14 });
+    // Digits (not the whole line box) are placed, so the clock sits tight to the top.
+    let cap_h = clock_font.cap_h();
+    let cap_off = clock_font.cap_offset();
+    let mid_h = char_h(TextSize::Mid);
     if portrait {
-        font::draw(f, &clock.time, w / 2 + dx, 8 + dy, clock_font, clock_color, Alignment::Center);
-        let sub_y = 8 + dy + clock_h + 2;
+        let top = 5 + dy;
+        font::draw(f, &clock.time, w / 2 + dx, top - cap_off, clock_font, clock_color, Alignment::Center);
+        let sub_y = top + cap_h + 7;
         text(f, &clock.date, Point::new(w / 2 + dx, sub_y), TextSize::Mid, MUTED, Alignment::Center);
         if info.count > 1 {
             let small = TextSize::Small;
-            let y = sub_y + (char_h(TextSize::Mid) - char_h(small)) / 2;
+            let y = sub_y + (mid_h - char_h(small)) / 2;
             text(f, &name, Point::new(margin, y), small, MUTED, Alignment::Left);
             text(f, &indicator, Point::new(w - margin, y), small, MUTED, Alignment::Right);
         }
-        8 + HEADER_DY_MAX + clock_h + 2 + char_h(TextSize::Mid) + 8
+        5 + HEADER_DY_MAX + cap_h + 7 + mid_h + 5
     } else {
-        font::draw(f, &clock.time, margin + dx, 8 + dy, clock_font, clock_color, Alignment::Left);
-        text(f, &clock.date, Point::new(w - margin, 12), TextSize::Mid, MUTED, Alignment::Right);
+        let top = 5 + dy;
+        font::draw(f, &clock.time, margin + dx, top - cap_off, clock_font, clock_color, Alignment::Left);
+        text(f, &clock.date, Point::new(w - margin, 4), TextSize::Mid, MUTED, Alignment::Right);
+        let name_y = 4 + mid_h + 3;
         if info.count > 1 {
             let small = TextSize::Small;
-            let y = 12 + char_h(TextSize::Mid) + 6;
-            text(f, &format!("{name}  {indicator}"), Point::new(w - margin, y), small, MUTED, Alignment::Right);
+            text(f, &format!("{name}  {indicator}"), Point::new(w - margin, name_y), small, MUTED, Alignment::Right);
         }
-        8 + HEADER_DY_MAX + clock_h + 6
+        let right_bottom = name_y + char_h(TextSize::Small);
+        (5 + HEADER_DY_MAX + cap_h).max(right_bottom) + 6
     }
 }
 
