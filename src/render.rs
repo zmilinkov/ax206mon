@@ -484,8 +484,8 @@ fn draw_header(f: &mut Frame, info: &PageInfo, clock: &Clock, portrait: bool) ->
     let margin = 16;
     let avail = if portrait { w - 2 * margin } else { w / 2 - margin };
     // The clock is the largest size that fits the space, up to a cap.
-    let max_px = if portrait { 80.0 } else { 54.0 } * font::scale();
-    let clock_font = font::Font::px(font::fit_px(avail, clock.time.chars().count(), max_px));
+    let max_em = if portrait { 64.0 } else { 40.0 } * font::scale();
+    let clock_font = font::Font::em(font::fit_em(avail, clock.time.chars().count(), max_em));
     let cw = clock_font.w() * clock.time.chars().count() as i32;
     let indicator = if info.count > 1 {
         format!("{}/{}", info.index + 1, info.count)
