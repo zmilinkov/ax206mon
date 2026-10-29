@@ -4,7 +4,7 @@
 //!   controller activity, newer kernels) or VRAM fill as fallback.
 //! * Intel: the i915 perf PMU exposes busy time per engine. The main bar is
 //!   the busier of the render (rcs) and compute (ccs, Arc) engines, with
-//!   extra rows for compute and the blitter (bcs). Opening a PMU counter
+//!   extra rows for compute, the blitter (bcs) and video (vcs/vecs). Opening a PMU counter
 //!   needs CAP_PERFMON (the systemd unit grants it) or perf_event_paranoid <= 0.
 
 use std::fs;
@@ -118,12 +118,17 @@ impl Probe {
                 let by_class = read_classes(engines);
                 let get = |c: &str| by_class.iter().find(|(k, _)| k == c).map(|(_, v)| *v);
                 let (render, compute, blitter) = (get("rcs"), get("ccs"), get("bcs"));
+                // Video decode/encode (vcs) and video enhance (vecs) engines.
+                let video = [get("vcs"), get("vecs")].into_iter().flatten().reduce(f32::max);
                 s.load = [render, compute].into_iter().flatten().reduce(f32::max);
                 if let Some(c) = compute {
                     s.rows.push(GpuRow { label: "CMP", pct: Some(c) });
                 }
                 if let Some(b) = blitter {
                     s.rows.push(GpuRow { label: "BLT", pct: Some(b) });
+                }
+                if let Some(v) = video {
+                    s.rows.push(GpuRow { label: "VID", pct: Some(v) });
                 }
             }
         }

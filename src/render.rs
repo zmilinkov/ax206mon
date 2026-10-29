@@ -200,7 +200,12 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn bar_height(b: &Bar, style: Style) -> i32 {
+/// Normal and tight vertical padding below a bar row; tight is used when
+/// the page would otherwise overflow (e.g. a GPU widget with many rows).
+const GAP: i32 = 8;
+const GAP_TIGHT: i32 = 3;
+
+fn bar_height(b: &Bar, style: Style, gap: i32) -> i32 {
     match style {
         Style::Stacked => {
             let legend = if b.legend.is_empty() {
@@ -208,16 +213,16 @@ fn bar_height(b: &Bar, style: Style) -> i32 {
             } else {
                 3 + char_h(&PROFONT_12_POINT)
             };
-            char_h(&PROFONT_18_POINT) + 4 + BAR_H as i32 + legend + 8
+            char_h(&PROFONT_18_POINT) + 4 + BAR_H as i32 + legend + gap
         }
-        Style::Line { label, bar_h, .. } => char_h(label).max(bar_h as i32) + 8,
+        Style::Line { label, bar_h, .. } => char_h(label).max(bar_h as i32) + gap,
     }
 }
 
-fn bars_height(bars: &[Bar], portrait: bool) -> i32 {
+fn bars_height(bars: &[Bar], portrait: bool, gap: i32) -> i32 {
     bars.iter()
         .enumerate()
-        .map(|(i, b)| bar_height(b, style_for(portrait, i)))
+        .map(|(i, b)| bar_height(b, style_for(portrait, i), gap))
         .sum()
 }
 
@@ -255,7 +260,7 @@ fn bar(f: &mut Frame, x: i32, y: i32, w: u32, h: u32, segs: &[Seg]) {
 }
 
 /// Draw one bar row in `x..x+w` starting at `y`; returns its height.
-fn draw_bar_row(f: &mut Frame, x: i32, y: i32, w: i32, b: &Bar, style: Style) -> i32 {
+fn draw_bar_row(f: &mut Frame, x: i32, y: i32, w: i32, b: &Bar, style: Style, gap: i32) -> i32 {
     let label_color = if b.hot { WARN } else { b.color };
     match style {
         Style::Stacked => {
@@ -286,7 +291,7 @@ fn draw_bar_row(f: &mut Frame, x: i32, y: i32, w: i32, b: &Bar, style: Style) ->
             bar(f, bx, y + (h - bar_h as i32) / 2, bw as u32, bar_h, &b.segs);
         }
     }
-    bar_height(b, style)
+    bar_height(b, style, gap)
 }
 
 pub fn human_bytes(b: u64) -> String {
@@ -329,6 +334,7 @@ fn frac(used: u64, total: u64) -> f32 {
 const CPU_IOWAIT: Rgb888 = Rgb888::new(0xa9, 0xd2, 0xff);
 const RAM_SYSTEM: Rgb888 = Rgb888::new(0x1f, 0x8a, 0x5e);
 const RAM_CACHE: Rgb888 = Rgb888::new(0xa6, 0xe8, 0xcf);
+const SWAP: Rgb888 = Rgb888::new(0xe9, 0xd4, 0x4c);
 const GPU: Rgb888 = Rgb888::new(0xff, 0x6f, 0xb5);
 
 fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a>> {
@@ -371,7 +377,16 @@ fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a
                     (format!("sys {}", human_bytes(m.kernel)), RAM_SYSTEM),
                     (format!("cache {}", human_bytes(m.cache)), RAM_CACHE),
                 ];
-                items.push(Item::Bars(vec![b]));
+                let mut rows = vec![b];
+                if m.swap_total > 0 && w.swap.unwrap_or(true) {
+                    rows.push(Bar::simple(
+                        "SWAP",
+                        format!("{} / {}", human_bytes(m.swap_used), human_bytes(m.swap_total)),
+                        frac(m.swap_used, m.swap_total),
+                        SWAP,
+                    ));
+                }
+                items.push(Item::Bars(rows));
             }
             Kind::Disk => {
                 let path = w.path.as_deref().unwrap_or(&global.disk_path);
@@ -736,15 +751,17 @@ pub fn render_page(
     let body: Vec<&Item> = items.iter().filter(|i| !matches!(i, Item::Status)).collect();
 
     let avail = h - header_h - status_count * STATUS_H - 4;
-    let natural = |i: &Item| match i {
-        Item::Bars(b) => bars_height(b, portrait),
+    let natural = |i: &Item, gap: i32| match i {
+        Item::Bars(b) => bars_height(b, portrait, gap),
         Item::DockerStatus(_) => DOCKER_STATUS_H,
         _ => 0,
     };
     let is_flex = |i: &Item| matches!(i, Item::DockerStacks(_) | Item::Services { .. } | Item::Network { .. });
     let flex = body.iter().filter(|i| is_flex(i)).count() as i32;
-    let fixed: i32 = body.iter().map(|i| natural(i)).sum();
     const MIN_FLEX: i32 = 60;
+    let total = |gap: i32| -> i32 { body.iter().map(|i| natural(i, gap)).sum() };
+    let gap = if total(GAP) + MIN_FLEX * flex > avail { GAP_TIGHT } else { GAP };
+    let fixed = total(gap);
     let scale = if flex > 0 {
         ((avail - MIN_FLEX * flex) as f32 / fixed.max(1) as f32).min(1.0)
     } else {
@@ -761,12 +778,12 @@ pub fn render_page(
     for item in &body {
         match item {
             Item::Bars(bars) => {
-                let nat = bars_height(bars, portrait);
+                let nat = bars_height(bars, portrait, gap);
                 let slot = (nat as f32 * scale) as i32;
                 // Centre the rows in their slot so spare space is spread evenly.
                 let mut ry = y + (slot - nat).max(0) / 2;
                 for (i, b) in bars.iter().enumerate() {
-                    ry += draw_bar_row(&mut f, margin, ry, cw, b, style_for(portrait, i));
+                    ry += draw_bar_row(&mut f, margin, ry, cw, b, style_for(portrait, i), gap);
                 }
                 y += slot.max(nat);
             }
@@ -869,7 +886,7 @@ mod tests {
         use crate::stats::{CpuUsage, MemUsage};
         let s = Snapshot {
             cpu: CpuUsage { busy: 30.0, iowait: 12.0 },
-            mem: MemUsage { total: 16 << 30, apps: 4 << 30, kernel: 1 << 30, cache: 6 << 30 },
+            mem: MemUsage { total: 16 << 30, apps: 4 << 30, kernel: 1 << 30, cache: 6 << 30, swap_total: 8 << 30, swap_used: 1 << 30 },
             temp_c: Some(55.0),
             disks: [("/".to_string(), (50u64 << 30, 100u64 << 30))].into(),
             gpus: vec![crate::gpu::GpuStat {
@@ -878,6 +895,7 @@ mod tests {
                 rows: vec![
                     crate::gpu::GpuRow { label: "CMP", pct: Some(70.0) },
                     crate::gpu::GpuRow { label: "BLT", pct: Some(10.0) },
+                    crate::gpu::GpuRow { label: "VID", pct: Some(35.0) },
                 ],
                 vram: None,
             }],

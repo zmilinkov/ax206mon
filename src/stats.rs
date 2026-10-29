@@ -35,6 +35,8 @@ pub struct MemUsage {
     pub kernel: u64,
     /// Page cache, buffers and reclaimable slab.
     pub cache: u64,
+    pub swap_total: u64,
+    pub swap_used: u64,
 }
 
 impl MemUsage {
@@ -258,6 +260,8 @@ fn parse_meminfo(s: &str) -> Option<MemUsage> {
         apps: in_use - kernel,
         kernel,
         cache,
+        swap_total: or0("SwapTotal:"),
+        swap_used: or0("SwapTotal:").saturating_sub(or0("SwapFree:")),
     })
 }
 
@@ -375,7 +379,7 @@ mod tests {
         let m = parse_meminfo(
             "MemTotal: 1000 kB\nMemFree: 100 kB\nBuffers: 50 kB\nCached: 300 kB\n\
              SReclaimable: 50 kB\nShmem: 100 kB\nSUnreclaim: 40 kB\nKernelStack: 10 kB\n\
-             PageTables: 10 kB\nPercpu: 0 kB\n",
+             PageTables: 10 kB\nPercpu: 0 kB\nSwapTotal: 400 kB\nSwapFree: 300 kB\n",
         )
         .unwrap();
         assert_eq!(m.total, 1000 * 1024);
@@ -383,5 +387,6 @@ mod tests {
         assert_eq!(m.kernel, 60 * 1024);
         assert_eq!(m.apps, (1000 - 100 - 300 - 60) * 1024);
         assert!(m.used() + m.cache <= m.total);
+        assert_eq!((m.swap_total, m.swap_used), (400 * 1024, 100 * 1024));
     }
 }
