@@ -15,7 +15,8 @@ The display cycles through the pages defined in
   * GPU: Radeon shows graphics load plus memory activity (VRAM fill on kernels
     without `mem_busy_percent`); Intel Arc (i915) shows the busier of the render
     and compute engines, plus compute, blitter and video rows (`ax206mon gpu` lists
-    every engine's load). Hidden when no supported GPU is found.
+    every engine's load). The GPU temperature (hwmon) is shown next to the
+    load. Hidden when no supported GPU is found.
 * **Page 2 (Services)** – systemd services named as `systemctl list-units -t
   service` shows them, with their state. Only as many as fit are shown; use
   `units = [...]` to choose which, or `filter` to pick running/active/failed/all.

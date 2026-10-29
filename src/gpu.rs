@@ -20,6 +20,8 @@ pub struct GpuStat {
     /// Secondary bars drawn under the main one.
     pub rows: Vec<GpuRow>,
     pub vram: Option<(u64, u64)>,
+    /// GPU temperature in degrees C (hwmon): junction if reported, else edge/first sensor.
+    pub temp_c: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -97,6 +99,7 @@ impl Probe {
     pub fn read(&mut self) -> GpuStat {
         let mut s = GpuStat {
             card: self.card.clone(),
+            temp_c: read_temp(&self.dev),
             ..Default::default()
         };
         match &mut self.kind {
@@ -171,6 +174,36 @@ fn read_classes(engines: &mut [Engine]) -> Vec<(String, f32)> {
         }
     }
     out
+}
+
+/// Temperature from the card's hwmon device (amdgpu and i915 both expose
+/// `temp*_input` in millidegrees C).
+fn read_temp(dev: &Path) -> Option<f32> {
+    let mut hwmons: Vec<PathBuf> = fs::read_dir(dev.join("hwmon"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    hwmons.sort();
+    let mut sensors = Vec::new();
+    for h in hwmons {
+        for i in 1..=8 {
+            if let Some(m) = read_num::<f32>(&h.join(format!("temp{i}_input"))) {
+                sensors.push((read_trim(&h.join(format!("temp{i}_label"))), m / 1000.0));
+            }
+        }
+    }
+    choose_temp(&sensors)
+}
+
+/// Prefer the junction (hotspot) sensor, then edge, then the first one.
+fn choose_temp(sensors: &[(String, f32)]) -> Option<f32> {
+    ["junction", "edge"]
+        .iter()
+        .find_map(|want| sensors.iter().find(|(l, _)| l == want))
+        .or_else(|| sensors.first())
+        .map(|&(_, t)| t)
 }
 
 fn read_trim(p: &Path) -> String {
@@ -295,6 +328,28 @@ mod tests {
     #[test]
     fn perf_attr_is_ver5_sized() {
         assert_eq!(std::mem::size_of::<PerfAttr>(), 112);
+    }
+
+    #[test]
+    fn temperature_sensor_choice() {
+        let s = |l: &str, t: f32| (l.to_string(), t);
+        // Radeon with edge + junction + mem: junction wins.
+        assert_eq!(choose_temp(&[s("edge", 51.0), s("junction", 58.0), s("mem", 60.0)]), Some(58.0));
+        assert_eq!(choose_temp(&[s("edge", 51.0)]), Some(51.0));
+        // Intel i915 reports an unlabelled temp1.
+        assert_eq!(choose_temp(&[s("", 55.0)]), Some(55.0));
+        assert_eq!(choose_temp(&[]), None);
+    }
+
+    #[test]
+    fn reads_temperature_from_hwmon_dir() {
+        let dev = std::env::temp_dir().join(format!("ax206mon-gpu-{}", std::process::id()));
+        let h = dev.join("hwmon/hwmon2");
+        fs::create_dir_all(&h).unwrap();
+        fs::write(h.join("temp1_input"), "51000\n").unwrap();
+        fs::write(h.join("temp1_label"), "edge\n").unwrap();
+        assert_eq!(read_temp(&dev), Some(51.0));
+        fs::remove_dir_all(&dev).unwrap();
     }
 
     #[test]
