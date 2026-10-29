@@ -8,15 +8,17 @@ USB-Display, USB ID `1908:0102`). Runs as a systemd service.
 The display cycles through the pages defined in
 `/etc/ax206mon/ax206mon.conf`. The clock and date are on every page.
 
-* **Page 1 (System)** – CPU, RAM, disk, temperature, GPU and a status footer.
-  * CPU bar: dark blue = processing, light blue = I/O wait.
+* **Page 1 (System)** – CPU (with temperature), RAM, disk, GPU and a status footer.
+  * CPU bar: dark blue = processing, light blue = I/O wait, with a thin CPU
+    temperature bar under it (`temp = false` hides it).
   * RAM bar: green = apps, dark green = system/kernel, pale = buffers/cache;
     a swap bar below it (hidden if there is no swap, or with `swap = false`).
   * GPU: Radeon shows graphics load plus memory activity (VRAM fill on kernels
     without `mem_busy_percent`); Intel Arc (i915) shows the busier of the render
     and compute engines, plus compute, blitter and video rows (`ax206mon gpu` lists
-    every engine's load). The GPU temperature (hwmon) is shown next to the
-    load. Hidden when no supported GPU is found.
+    every engine's load). The GPU temperature (hwmon) is a thin bar under the
+    load bar. When a page has no room for the temperature bars, the temperature is
+    written next to the load percentage instead. Hidden when no supported GPU is found.
 * **Page 2 (Services)** – systemd services named as `systemctl list-units -t
   service` shows them, with their state. Only as many as fit are shown; use
   `units = [...]` to choose which, or `filter` to pick running/active/failed/all.

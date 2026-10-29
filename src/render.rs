@@ -312,14 +312,29 @@ const RAM_CACHE: Rgb888 = Rgb888::new(0xa6, 0xe8, 0xcf);
 const SWAP: Rgb888 = Rgb888::new(0xe9, 0xd4, 0x4c);
 const GPU: Rgb888 = Rgb888::new(0xff, 0x6f, 0xb5);
 
-fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a>> {
+/// Thin temperature bar shown under a load bar.
+fn temp_row(t: f32) -> Bar {
+    Bar::simple("TEMP", format!("{t:.0}\u{b0}C"), t / 100.0, TEMP)
+}
+
+/// Widgets of `page` as drawable items. With `temp_rows` the CPU and GPU
+/// temperatures get their own thin bar under the load bar; without it
+/// (not enough room) they are written next to the load percentage.
+fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot, temp_rows: bool) -> Vec<Item<'a>> {
     let mut items = Vec::new();
+    let standalone_temp = page.widgets.iter().any(|w| w.kind == Kind::Temp);
     for w in &page.widgets {
         let label = |default: &str| w.label.clone().unwrap_or_else(|| default.to_string());
         match w.kind {
             Kind::Cpu => {
                 let c = s.cpu;
-                let mut b = Bar::simple(label("CPU"), format!("{:.0}%", c.total()), c.total() / 100.0, CPU);
+                // A separate `temp` widget on the page takes over the CPU temperature.
+                let cpu_temp = s.temp_c.filter(|_| w.temp.unwrap_or(true) && !standalone_temp);
+                let mut value = format!("{:.0}%", c.total());
+                if let Some(t) = cpu_temp.filter(|_| !temp_rows) {
+                    value = format!("{value}  {t:.0}\u{b0}C");
+                }
+                let mut b = Bar::simple(label("CPU"), value, c.total() / 100.0, CPU);
                 b.hot = c.total() >= 90.0;
                 b.segs = vec![
                     Seg { frac: c.busy / 100.0, color: CPU },
@@ -329,7 +344,11 @@ fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a
                     (format!("proc {:.0}%", c.busy), CPU),
                     (format!("iowait {:.0}%", c.iowait), CPU_IOWAIT),
                 ];
-                items.push(Item::Bars(vec![b]));
+                let mut rows = vec![b];
+                if let Some(t) = cpu_temp.filter(|_| temp_rows) {
+                    rows.push(temp_row(t));
+                }
+                items.push(Item::Bars(rows));
             }
             Kind::Ram => {
                 let m = s.mem;
@@ -390,8 +409,9 @@ fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a
                 };
                 if let Some(g) = g {
                     let pct = |v: Option<f32>| v.map_or("n/a".to_string(), |v| format!("{v:.0}%"));
+                    let gpu_temp = g.temp_c.filter(|_| w.temp.unwrap_or(true));
                     let mut value = pct(g.load);
-                    if let Some(t) = g.temp_c.filter(|_| w.temp.unwrap_or(true)) {
+                    if let Some(t) = gpu_temp.filter(|_| !temp_rows) {
                         value = format!("{value}  {t:.0}\u{b0}C");
                     }
                     let mut main = Bar::simple(label("GPU"), value, g.load.unwrap_or(0.0) / 100.0, GPU);
@@ -399,6 +419,9 @@ fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a
                         main.hot = false;
                     }
                     let mut rows = vec![main];
+                    if let Some(t) = gpu_temp.filter(|_| temp_rows) {
+                        rows.push(temp_row(t));
+                    }
                     for r in &g.rows {
                         rows.push(Bar::simple(r.label, pct(r.pct), r.pct.unwrap_or(0.0) / 100.0, GPU));
                     }
@@ -443,6 +466,32 @@ fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a
         }
     }
     items
+}
+
+/// Height of a non-flex item (flex items report 0).
+fn item_height(i: &Item, portrait: bool, gap: i32) -> i32 {
+    match i {
+        Item::Bars(b) => bars_height(b, portrait, gap),
+        Item::DockerStatus(_) => docker_status_h(),
+        _ => 0,
+    }
+}
+
+fn is_flex_item(i: &Item) -> bool {
+    matches!(i, Item::DockerStacks(_) | Item::Services { .. } | Item::Network { .. })
+}
+
+/// Would all body items fit in `avail` pixels at the given row spacing
+/// (leaving a minimum for each flexible list)?
+fn fits(items: &[Item], portrait: bool, avail: i32, gap: i32) -> bool {
+    const MIN_FLEX: i32 = 60;
+    let body = items.iter().filter(|i| !matches!(i, Item::Status));
+    let (mut fixed, mut flex) = (0, 0);
+    for i in body {
+        fixed += item_height(i, portrait, gap);
+        flex += i32::from(is_flex_item(i));
+    }
+    fixed + MIN_FLEX * flex <= avail
 }
 
 pub struct PageInfo<'a> {
@@ -734,17 +783,18 @@ pub fn render_page(
 
     let header_h = draw_header(&mut f, info, clock, portrait);
 
-    let items = build_items(info.page, global, s);
+    let mut items = build_items(info.page, global, s, true);
     let status_count = items.iter().filter(|i| matches!(i, Item::Status)).count() as i32;
+    let avail = h - header_h - status_count * STATUS_H - 4;
+    // Temperature bars are only used when the page still fits with them,
+    // even at the tightest spacing; otherwise the temperature goes inline.
+    if !fits(&items, portrait, avail, GAP_TIGHT) {
+        items = build_items(info.page, global, s, false);
+    }
     let body: Vec<&Item> = items.iter().filter(|i| !matches!(i, Item::Status)).collect();
 
-    let avail = h - header_h - status_count * STATUS_H - 4;
-    let natural = |i: &Item, gap: i32| match i {
-        Item::Bars(b) => bars_height(b, portrait, gap),
-        Item::DockerStatus(_) => docker_status_h(),
-        _ => 0,
-    };
-    let is_flex = |i: &Item| matches!(i, Item::DockerStacks(_) | Item::Services { .. } | Item::Network { .. });
+    let natural = |i: &Item, gap: i32| item_height(i, portrait, gap);
+    let is_flex = |i: &Item| is_flex_item(i);
     let flex = body.iter().filter(|i| is_flex(i)).count() as i32;
     const MIN_FLEX: i32 = 60;
     let total = |gap: i32| -> i32 { body.iter().map(|i| natural(i, gap)).sum() };
@@ -864,6 +914,31 @@ pub fn fit_image(img: &image::DynamicImage, width: u32, height: u32) -> Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temperature_bars_or_inline_text() {
+        let s = Snapshot { temp_c: Some(55.0), ..Default::default() };
+        let g = Global::default();
+        let page = |kinds: &[Kind]| Page {
+            widgets: kinds.iter().map(|&k| crate::config::Widget::new(k)).collect(),
+            ..Default::default()
+        };
+        let rows = |items: &[Item]| match &items[0] {
+            Item::Bars(b) => (b.len(), b[0].value.clone()),
+            _ => panic!("expected bars"),
+        };
+        // Room: a thin TEMP row under the load bar, value text is just the load.
+        let (n, v) = rows(&build_items(&page(&[Kind::Cpu]), &g, &s, true));
+        assert_eq!((n, v.as_str()), (2, "0%"));
+        // No room: the temperature moves next to the load.
+        let (n, v) = rows(&build_items(&page(&[Kind::Cpu]), &g, &s, false));
+        assert_eq!(n, 1);
+        assert!(v.contains("55\u{b0}C"), "{v}");
+        // A standalone temp widget on the page keeps the CPU bar plain.
+        let items = build_items(&page(&[Kind::Cpu, Kind::Temp]), &g, &s, true);
+        assert_eq!(rows(&items), (1, "0%".to_string()));
+        assert_eq!(items.len(), 2);
+    }
 
     #[test]
     fn human_bytes_formats() {

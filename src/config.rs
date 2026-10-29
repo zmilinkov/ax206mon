@@ -178,7 +178,8 @@ pub struct Widget {
     pub ipv4: Option<bool>,
     /// `network`: show IPv6 addresses (default true).
     pub ipv6: Option<bool>,
-    /// `gpu`: show the GPU temperature next to the load (default true).
+    /// `cpu` / `gpu`: show the temperature under the load bar, or next to the
+    /// load when there is no room (default true).
     pub temp: Option<bool>,
     /// `ram`: show a swap bar under the memory bar when swap exists (default true).
     pub swap: Option<bool>,
@@ -295,7 +296,7 @@ impl Default for Config {
                 Page {
                     name: "System".into(),
                     duration: None,
-                    widgets: w(&[Cpu, Ram, Disk, Temp, Gpu, Status]),
+                    widgets: w(&[Cpu, Ram, Disk, Gpu, Status]),
                 },
                 Page {
                     name: "Services".into(),
