@@ -335,10 +335,11 @@ impl Config {
                     toml::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
                 c.validate()
                     .with_context(|| format!("in {}", path.display()))?;
-                log::debug!("loaded config from {}", path.display());
+                log::info!("loaded config from {}", path.display());
                 Ok(c)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && !explicit => {
+                log::info!("no config file at {}; using built-in defaults", path.display());
                 Ok(Config::default())
             }
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),

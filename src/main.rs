@@ -275,6 +275,17 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
     let mut schedule = schedule::Schedule::new(Instant::now());
     let mut detector = schedule::BusyDetector::new();
     let mut was_busy = false;
+    let b = &cfg.busy;
+    info!(
+        "busy schedule {}: threshold {:.0}%, page 1 for {:.0}s then others for {:.0}s, \
+         average {:.0}s, hold {:.0}s",
+        if b.enabled { "enabled" } else { "disabled" },
+        b.load_threshold,
+        b.main_page_seconds,
+        b.other_page_seconds,
+        b.average_seconds,
+        b.hold_seconds
+    );
     let refresh_every = (cfg.burnin.idle_refresh_hours > 0.0)
         .then(|| Duration::from_secs_f64(cfg.burnin.idle_refresh_hours * 3600.0));
     let mut last_refresh = Instant::now();
