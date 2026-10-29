@@ -13,15 +13,14 @@ use crate::frame::Frame;
 
 static TTF: &[u8] = include_bytes!("../assets/fonts/NotoSansMono-Regular.ttf");
 
-/// Advance width of every glyph, as a fraction of the pixel size.
+/// Advance width of every glyph, as a fraction of the em.
 const ADVANCE: f32 = 0.6;
-/// Line box height and baseline position, as fractions of the pixel size.
-const LINE_H: f32 = 1.12;
-const BASELINE: f32 = 0.86;
-/// Height of digits relative to `px`. Note `px` is ab_glyph's PxScale, i.e.
-/// the font's full ascent+descent height (1.362 em for Noto Sans Mono), not
-/// the em size: digits are 0.714 em = 0.52-0.54 of `px`.
-const CAP_H: f32 = 0.54;
+/// Line box height and baseline position, as fractions of the em. Digits
+/// are 0.714 em tall and descenders reach about 0.24 em below the baseline.
+const LINE_H: f32 = 1.2;
+const BASELINE: f32 = 0.92;
+/// Height of digits and capitals, as a fraction of the em.
+const CAP_H: f32 = 0.714;
 
 thread_local! {
     /// Multiplier on all text sizes (`global.font_scale`). Per thread: the
@@ -49,16 +48,16 @@ pub enum TextSize {
 }
 
 impl TextSize {
-    fn base_px(self) -> f32 {
+    fn base_em(self) -> f32 {
         match self {
-            TextSize::Small => 12.0,
-            TextSize::Mid => 16.0,
-            TextSize::Big => 20.0,
+            TextSize::Small => 11.0,
+            TextSize::Mid => 15.0,
+            TextSize::Big => 18.0,
         }
     }
 
     pub fn font(self) -> Font {
-        Font::px((self.base_px() * scale()).max(6.0))
+        Font::em((self.base_em() * scale()).max(6.0))
     }
 
     /// Cell width in pixels.
@@ -74,25 +73,26 @@ impl TextSize {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Font {
-    px: f32,
+    em: f32,
 }
 
 impl Font {
-    pub fn px(px: f32) -> Self {
-        Font { px }
+    /// A font whose em square is `em` pixels tall.
+    pub fn em(em: f32) -> Self {
+        Font { em }
     }
 
     pub fn w(self) -> i32 {
-        ((self.px * ADVANCE).round() as i32).max(1)
+        ((self.em * ADVANCE).round() as i32).max(1)
     }
 
     pub fn h(self) -> i32 {
-        (self.px * LINE_H).round() as i32
+        (self.em * LINE_H).round() as i32
     }
 
     /// Height of digits/capitals in pixels.
     pub fn cap_h(self) -> i32 {
-        (self.px * CAP_H).round() as i32
+        (self.em * CAP_H).round() as i32
     }
 
     /// Distance from the top of the line box to the top of digits/capitals.
@@ -101,15 +101,15 @@ impl Font {
     }
 
     fn baseline(self) -> i32 {
-        (self.px * BASELINE).round() as i32
+        (self.em * BASELINE).round() as i32
     }
 }
 
-/// Largest pixel size at which `chars` characters fit in `width` pixels.
-pub fn fit_px(width: i32, chars: usize, max_px: f32) -> f32 {
+/// Largest em (whole pixels) at which `chars` characters fit in `width` pixels.
+pub fn fit_em(width: i32, chars: usize, max_em: f32) -> f32 {
     let by_width = width as f32 / (ADVANCE * chars.max(1) as f32);
     // Whole pixel sizes keep the rounded cell width stable.
-    by_width.min(max_px).floor().max(6.0)
+    by_width.min(max_em).floor().max(6.0)
 }
 
 struct Glyph {
@@ -129,16 +129,24 @@ thread_local! {
     static CACHE: RefCell<HashMap<(char, u32), std::rc::Rc<Glyph>>> = RefCell::new(HashMap::new());
 }
 
-fn glyph(c: char, px: f32) -> std::rc::Rc<Glyph> {
-    let key = (c, (px * 10.0).round() as u32);
+/// ab_glyph's PxScale is the font's full ascent+descent height, not the em:
+/// convert so that `em` really is the em size.
+fn px_scale(font: &FontRef<'_>, em: f32) -> PxScale {
+    let upm = font.units_per_em().unwrap_or(1000.0);
+    PxScale::from(em * font.height_unscaled() / upm)
+}
+
+fn glyph(c: char, em: f32) -> std::rc::Rc<Glyph> {
+    let key = (c, (em * 10.0).round() as u32);
     if let Some(g) = CACHE.with(|m| m.borrow().get(&key).cloned()) {
         return g;
     }
     let g = std::rc::Rc::new(FONT.with(|font| {
-        let scaled = font.as_scaled(PxScale::from(px));
+        let scale = px_scale(font, em);
+        let scaled = font.as_scaled(scale);
         let id = font.glyph_id(c);
         let advance = scaled.h_advance(id);
-        let g = id.with_scale_and_position(PxScale::from(px), point(0.0, 0.0));
+        let g = id.with_scale_and_position(scale, point(0.0, 0.0));
         match font.outline_glyph(g) {
             Some(o) => {
                 let b = o.px_bounds();
@@ -188,7 +196,7 @@ pub fn draw(f: &mut Frame, s: &str, x: i32, y: i32, font: Font, color: Rgb888, a
         if c == ' ' {
             continue;
         }
-        let g = glyph(c, font.px);
+        let g = glyph(c, font.em);
         let pen = start + i as i32 * cell + ((cell as f32 - g.advance) / 2.0).round() as i32;
         for gy in 0..g.h {
             for gx in 0..g.w {
@@ -222,6 +230,18 @@ mod tests {
     }
 
     #[test]
+    fn scaled_advance_matches_the_cell_width() {
+        // Regression: PxScale is the line height, not the em; the real glyph
+        // advance must equal the cell width used for layout.
+        FONT.with(|font| {
+            for em in [11.0f32, 18.0, 40.0] {
+                let adv = font.as_scaled(px_scale(font, em)).h_advance(font.glyph_id('0'));
+                assert!((adv - em * ADVANCE).abs() < 0.2, "em {em}: advance {adv}");
+            }
+        });
+    }
+
+    #[test]
     fn covers_the_characters_the_dashboard_uses() {
         FONT.with(|font| {
             for c in "0123456789:/%.-~+!\u{b0}abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".chars() {
@@ -235,25 +255,25 @@ mod tests {
         FONT.with(|font| {
             let g = font
                 .glyph_id('0')
-                .with_scale_and_position(PxScale::from(1000.0), point(0.0, 0.0));
+                .with_scale_and_position(px_scale(font, 1000.0), point(0.0, 0.0));
             let h = font.outline_glyph(g).unwrap().px_bounds().height();
-            // Digits are a touch taller than capitals (overshoot); allow 3 %.
+            // Digits are about 0.714 em tall; allow 3 %.
             assert!((h / 1000.0 - CAP_H).abs() < 0.03, "digit height {}", h / 1000.0);
         });
     }
 
     #[test]
     fn metrics_scale() {
-        let f = Font::px(20.0);
-        assert_eq!((f.w(), f.h()), (12, 22));
+        let f = Font::em(20.0);
+        assert_eq!((f.w(), f.h()), (12, 24));
         assert!(TextSize::Small.w() < TextSize::Mid.w() && TextSize::Mid.w() < TextSize::Big.w());
     }
 
     #[test]
-    fn fit_px_respects_width_and_max() {
-        // 5 chars in 288 px: 96 px would fit, capped by max.
-        assert_eq!(fit_px(288, 5, 76.0), 76.0);
-        assert_eq!(fit_px(100, 5, 76.0), 33.0);
+    fn fit_em_respects_width_and_max() {
+        // 5 chars in 288 px: em 96 would fit, capped by max.
+        assert_eq!(fit_em(288, 5, 76.0), 76.0);
+        assert_eq!(fit_em(100, 5, 76.0), 33.0);
     }
 
     #[test]
