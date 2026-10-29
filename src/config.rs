@@ -147,6 +147,8 @@ pub struct Widget {
     pub ipv4: Option<bool>,
     /// `network`: show IPv6 addresses (default true).
     pub ipv6: Option<bool>,
+    /// `ram`: show a swap bar under the memory bar when swap exists (default true).
+    pub swap: Option<bool>,
     /// `network`: show each interface's MAC address under its IPs (default false).
     pub mac: Option<bool>,
     /// `network` without `interfaces`: also list loopback (default false).
@@ -165,6 +167,7 @@ impl Widget {
             interfaces: None,
             ipv4: None,
             ipv6: None,
+            swap: None,
             mac: None,
             loopback: None,
         }
@@ -186,6 +189,7 @@ impl<'de> Deserialize<'de> for Widget {
             interfaces: Option<Vec<String>>,
             ipv4: Option<bool>,
             ipv6: Option<bool>,
+            swap: Option<bool>,
             mac: Option<bool>,
             loopback: Option<bool>,
         }
@@ -206,6 +210,7 @@ impl<'de> Deserialize<'de> for Widget {
                 interfaces: f.interfaces,
                 ipv4: f.ipv4,
                 ipv6: f.ipv6,
+                swap: f.swap,
                 mac: f.mac,
                 loopback: f.loopback,
             }),

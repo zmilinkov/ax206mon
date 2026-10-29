@@ -334,6 +334,7 @@ fn frac(used: u64, total: u64) -> f32 {
 const CPU_IOWAIT: Rgb888 = Rgb888::new(0xa9, 0xd2, 0xff);
 const RAM_SYSTEM: Rgb888 = Rgb888::new(0x1f, 0x8a, 0x5e);
 const RAM_CACHE: Rgb888 = Rgb888::new(0xa6, 0xe8, 0xcf);
+const SWAP: Rgb888 = Rgb888::new(0xe9, 0xd4, 0x4c);
 const GPU: Rgb888 = Rgb888::new(0xff, 0x6f, 0xb5);
 
 fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a>> {
@@ -376,7 +377,16 @@ fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a
                     (format!("sys {}", human_bytes(m.kernel)), RAM_SYSTEM),
                     (format!("cache {}", human_bytes(m.cache)), RAM_CACHE),
                 ];
-                items.push(Item::Bars(vec![b]));
+                let mut rows = vec![b];
+                if m.swap_total > 0 && w.swap.unwrap_or(true) {
+                    rows.push(Bar::simple(
+                        "SWAP",
+                        format!("{} / {}", human_bytes(m.swap_used), human_bytes(m.swap_total)),
+                        frac(m.swap_used, m.swap_total),
+                        SWAP,
+                    ));
+                }
+                items.push(Item::Bars(rows));
             }
             Kind::Disk => {
                 let path = w.path.as_deref().unwrap_or(&global.disk_path);
@@ -876,7 +886,7 @@ mod tests {
         use crate::stats::{CpuUsage, MemUsage};
         let s = Snapshot {
             cpu: CpuUsage { busy: 30.0, iowait: 12.0 },
-            mem: MemUsage { total: 16 << 30, apps: 4 << 30, kernel: 1 << 30, cache: 6 << 30 },
+            mem: MemUsage { total: 16 << 30, apps: 4 << 30, kernel: 1 << 30, cache: 6 << 30, swap_total: 8 << 30, swap_used: 1 << 30 },
             temp_c: Some(55.0),
             disks: [("/".to_string(), (50u64 << 30, 100u64 << 30))].into(),
             gpus: vec![crate::gpu::GpuStat {
