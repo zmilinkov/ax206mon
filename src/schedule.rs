@@ -69,30 +69,59 @@ impl Schedule {
     }
 }
 
-/// Keeps "busy" on for `hold` seconds after the load last exceeded the
-/// threshold, so a load that hovers around it doesn't flip the schedule.
+/// Decides whether the machine counts as busy. CPU and GPU load are each
+/// smoothed with a moving average (`busy.average_seconds`), so a load that
+/// merely hovers around the threshold is judged by its average instead of
+/// by single samples. Once busy, it stays busy for `hold_seconds` after the
+/// smoothed load was last above the threshold.
 pub struct BusyDetector {
+    cpu: Option<f32>,
+    gpu: Option<f32>,
+    last: Option<Instant>,
     until: Option<Instant>,
 }
 
 impl BusyDetector {
     pub fn new() -> Self {
-        Self { until: None }
+        Self {
+            cpu: None,
+            gpu: None,
+            last: None,
+            until: None,
+        }
     }
 
-    pub fn update(&mut self, now: Instant, load: f32, cfg: &Config) -> bool {
-        let b = &cfg.busy;
-        if !b.enabled {
+    /// Feed one load sample (percent) taken at `now`.
+    pub fn sample(&mut self, now: Instant, cpu: f32, gpu: f32, cfg: &Config) {
+        let tau = cfg.busy.average_seconds;
+        let alpha = match self.last {
+            Some(t) => 1.0 - (-now.duration_since(t).as_secs_f64() / tau).exp(),
+            None => 1.0,
+        } as f32;
+        let ema = |old: Option<f32>, new: f32| old.map_or(new, |o| o + alpha * (new - o));
+        self.cpu = Some(ema(self.cpu, cpu));
+        self.gpu = Some(ema(self.gpu, gpu));
+        self.last = Some(now);
+        if self.load() > cfg.busy.load_threshold {
+            self.until = Some(now + Duration::from_secs_f64(cfg.busy.hold_seconds));
+        }
+    }
+
+    /// Smoothed load of the busier of CPU and GPU.
+    pub fn load(&self) -> f32 {
+        self.cpu.unwrap_or(0.0).max(self.gpu.unwrap_or(0.0))
+    }
+
+    pub fn smoothed(&self) -> (f32, f32) {
+        (self.cpu.unwrap_or(0.0), self.gpu.unwrap_or(0.0))
+    }
+
+    pub fn is_busy(&self, now: Instant, cfg: &Config) -> bool {
+        if !cfg.busy.enabled {
             return false;
         }
-        if load > b.load_threshold {
-            self.until = Some(now + Duration::from_secs_f64(b.hold_seconds));
-        }
-        // The hold is inclusive so hold_seconds = 0 means "busy only while above".
-        match self.until {
-            Some(t) => now < t || load > b.load_threshold,
-            None => false,
-        }
+        // hold_seconds = 0 means "busy only while above the threshold".
+        self.load() > cfg.busy.load_threshold || self.until.is_some_and(|t| now < t)
     }
 }
 
@@ -172,13 +201,59 @@ mod tests {
     fn detector_holds_busy_after_load_drops() {
         let mut c = cfg(4);
         c.busy.hold_seconds = 10.0;
+        c.busy.average_seconds = 1.0;
         let t0 = Instant::now();
         let mut d = BusyDetector::new();
-        assert!(!d.update(t0, 10.0, &c));
-        assert!(d.update(t0, 50.0, &c));
-        assert!(d.update(t0 + Duration::from_secs(5), 5.0, &c), "held");
-        assert!(!d.update(t0 + Duration::from_secs(11), 5.0, &c));
+        d.sample(t0, 10.0, 0.0, &c);
+        assert!(!d.is_busy(t0, &c));
+        d.sample(t0 + Duration::from_secs(1), 90.0, 0.0, &c);
+        assert!(d.is_busy(t0 + Duration::from_secs(1), &c));
+        // Load drops to 0: the smoothed value falls below the threshold but
+        // busy is held for 10 s after it was last above.
+        for s in 2..=8 {
+            d.sample(t0 + Duration::from_secs(s), 0.0, 0.0, &c);
+        }
+        assert!(d.is_busy(t0 + Duration::from_secs(8), &c), "held");
+        d.sample(t0 + Duration::from_secs(20), 0.0, 0.0, &c);
+        assert!(!d.is_busy(t0 + Duration::from_secs(20), &c));
         c.busy.enabled = false;
-        assert!(!d.update(t0, 99.0, &c));
+        assert!(!d.is_busy(t0, &c));
+    }
+
+    #[test]
+    fn load_hovering_around_the_threshold_stays_busy() {
+        // Threshold 15, GPU bouncing 14..21 (average ~17): busy throughout,
+        // not just at the samples above 15.
+        let mut c = cfg(4);
+        c.busy.load_threshold = 15.0;
+        c.busy.hold_seconds = 0.0;
+        c.busy.average_seconds = 15.0;
+        let t0 = Instant::now();
+        let mut d = BusyDetector::new();
+        let samples = [14.0, 21.0, 16.0, 14.0, 20.0, 15.0, 18.0, 14.0, 21.0, 17.0];
+        let mut busy_after_warmup = Vec::new();
+        for (i, g) in samples.iter().cycle().take(60).enumerate() {
+            let t = t0 + Duration::from_secs(2 * i as u64);
+            d.sample(t, 5.0, *g, &c);
+            if i >= 10 {
+                busy_after_warmup.push(d.is_busy(t, &c));
+            }
+        }
+        assert!(busy_after_warmup.iter().all(|&b| b), "flapped: {busy_after_warmup:?}");
+    }
+
+    #[test]
+    fn a_single_spike_does_not_start_the_busy_schedule() {
+        let mut c = cfg(4);
+        c.busy.hold_seconds = 0.0;
+        c.busy.average_seconds = 15.0;
+        let t0 = Instant::now();
+        let mut d = BusyDetector::new();
+        for i in 0..10 {
+            d.sample(t0 + Duration::from_secs(2 * i), 3.0, 3.0, &c);
+        }
+        let t = t0 + Duration::from_secs(21);
+        d.sample(t, 60.0, 3.0, &c);
+        assert!(!d.is_busy(t, &c), "average is {}", d.load());
     }
 }

@@ -274,8 +274,7 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
     let mut reported_missing = false;
     let mut schedule = schedule::Schedule::new(Instant::now());
     let mut detector = schedule::BusyDetector::new();
-    // Load seen in the previous snapshot; the page is chosen before the next one is taken.
-    let mut load = 0.0f32;
+    let mut was_busy = false;
     let refresh_every = (cfg.burnin.idle_refresh_hours > 0.0)
         .then(|| Duration::from_secs_f64(cfg.burnin.idle_refresh_hours * 3600.0));
     let mut last_refresh = Instant::now();
@@ -333,7 +332,17 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
                 continue;
             }
 
-            let busy = detector.update(started, load, cfg);
+            // The page is chosen from the samples taken so far (one refresh behind).
+            let busy = detector.is_busy(started, cfg);
+            if busy != was_busy {
+                let (cpu, gpu) = detector.smoothed();
+                info!(
+                    "busy schedule {} (smoothed load cpu {cpu:.0}%, gpu {gpu:.0}%, threshold {:.0}%)",
+                    if busy { "on" } else { "off" },
+                    cfg.busy.load_threshold
+                );
+                was_busy = busy;
+            }
             let page = schedule.update(started, busy, cfg);
             let info = render::PageInfo {
                 page: &cfg.pages[page],
@@ -342,11 +351,10 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
                 variant: variant_for(cfg, page, &clock),
             };
             let snap = collector.snapshot(&needs_for(cfg, page));
-            load = snap
-                .gpus
-                .iter()
-                .filter_map(|g| g.load)
-                .fold(snap.cpu.busy, f32::max);
+            // CPU as shown on the bar (processing + I/O wait), busiest GPU.
+            let gpu = snap.gpus.iter().filter_map(|g| g.load).fold(0.0, f32::max);
+            detector.sample(Instant::now(), snap.cpu.total(), gpu, cfg);
+            log::debug!("load sample: cpu {:.0}% gpu {gpu:.0}%", snap.cpu.total());
             let frame = render::render_page(w, h, &info, &cfg.global, &snap, &clock);
             if let Err(e) = show(&mut d, &frame, rot) {
                 warn!("lost the display: {e:#}");
