@@ -24,6 +24,24 @@ systemd service. Config: `/etc/ax206mon/ax206mon.conf` (TOML, `[global]` +
 
 - Keep `packaging/ax206mon.conf`, `Config::default()` and `README.md` in sync
   (a test checks the packaged config against the defaults).
-- Cargo.toml `version` must match the spec's `Version`.
+- Cargo.toml `version` must match the spec's `Version` (a test checks this).
 - Keep Rust compatible with `rust-version = "1.84"` (AlmaLinux build).
 - Layout must work in portrait and landscape.
+
+## Versioning
+
+Semantic versioning `MAJOR.MINOR.PATCH`; every package build from `main` must
+have a version that has not been built before.
+
+- **New feature** (a feature branch): bump the **minor** version and reset the
+  patch to 0 (0.3.0 -> 0.4.0).
+- **Bug fix**: bump the **patch** version only (0.4.0 -> 0.4.1).
+- **Major** version: only the user changes it, when they say so. Never bump it
+  on your own.
+- Include the bump in the feature/fix branch itself. Update all of:
+  `Cargo.toml` `version`, `Cargo.lock` (the `ax206mon` entry, e.g. by running
+  `cargo build`), `packaging/ax206mon.spec` `Version:` (keep `Release: 1`), and
+  add a `%changelog` entry at the top of the spec with the new version and a
+  short summary.
+- If two open branches bump to the same number, the one merged second takes
+  the next number when it is updated from `main`.
