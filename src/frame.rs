@@ -67,28 +67,6 @@ impl Frame {
         }
     }
 
-    /// Copy `src` onto this frame at (x, y), scaled up by an integer factor,
-    /// skipping pixels equal to `transparent`.
-    pub fn blit_scaled(&mut self, src: &Frame, x: i32, y: i32, scale: u32, transparent: Rgb888) {
-        for sy in 0..src.height {
-            for sx in 0..src.width {
-                let c = src.get(sx, sy);
-                if c == transparent {
-                    continue;
-                }
-                for dy in 0..scale {
-                    for dx in 0..scale {
-                        let px = x + (sx * scale + dx) as i32;
-                        let py = y + (sy * scale + dy) as i32;
-                        if px >= 0 && py >= 0 {
-                            self.set(px as u32, py as u32, c);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// Convert to the panel's wire format: RGB565 big-endian, rotated so
     /// the logical canvas appears upright on the physical panel.
     pub fn to_panel_rgb565(&self, rot: Rotation, panel_w: u32, panel_h: u32) -> Vec<u8> {
