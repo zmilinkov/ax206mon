@@ -339,7 +339,10 @@ impl Config {
                 Ok(c)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && !explicit => {
-                log::info!("no config file at {}; using built-in defaults", path.display());
+                log::warn!(
+                    "no config file at {}; using built-in defaults (pass -c <file> to use another)",
+                    path.display()
+                );
                 Ok(Config::default())
             }
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
