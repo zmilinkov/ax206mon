@@ -64,6 +64,9 @@ pub struct Busy {
     pub other_page_seconds: f64,
     /// Seconds the load must stay below the threshold before leaving busy mode.
     pub hold_seconds: f64,
+    /// Time constant (seconds) of the moving average applied to CPU and GPU load
+    /// before comparing it with the threshold.
+    pub average_seconds: f64,
 }
 
 impl Default for Busy {
@@ -74,6 +77,7 @@ impl Default for Busy {
             main_page_seconds: 12.0,
             other_page_seconds: 8.0,
             hold_seconds: 10.0,
+            average_seconds: 15.0,
         }
     }
 }
@@ -331,10 +335,14 @@ impl Config {
                     toml::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
                 c.validate()
                     .with_context(|| format!("in {}", path.display()))?;
-                log::debug!("loaded config from {}", path.display());
+                log::info!("loaded config from {}", path.display());
                 Ok(c)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && !explicit => {
+                log::warn!(
+                    "no config file at {}; using built-in defaults (pass -c <file> to use another)",
+                    path.display()
+                );
                 Ok(Config::default())
             }
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
@@ -369,6 +377,9 @@ impl Config {
             if !(1.0..=86_400.0).contains(&v) {
                 bail!("busy.{name} must be between 1 and 86400 seconds");
             }
+        }
+        if !(1.0..=600.0).contains(&busy.average_seconds) {
+            bail!("busy.average_seconds must be between 1 and 600 seconds");
         }
         if !(0.0..=3600.0).contains(&busy.hold_seconds) {
             bail!("busy.hold_seconds must be between 0 and 3600 seconds");
@@ -518,7 +529,7 @@ mod tests {
             (d.busy.load_threshold, d.busy.main_page_seconds, d.busy.other_page_seconds),
             (30.0, 12.0, 8.0)
         );
-        for bad in ["[busy]\nload_threshold = 0", "[busy]\nmain_page_seconds = 0", "[busy]\nhold_seconds = -1"] {
+        for bad in ["[busy]\nload_threshold = 0", "[busy]\nmain_page_seconds = 0", "[busy]\nhold_seconds = -1", "[busy]\naverage_seconds = 0"] {
             let c: Config = toml::from_str(bad).unwrap();
             assert!(c.validate().is_err(), "{bad}");
         }
