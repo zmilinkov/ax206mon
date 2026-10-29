@@ -2,6 +2,7 @@ mod ax206;
 mod burnin;
 mod config;
 mod docker;
+mod font;
 mod frame;
 mod gpu;
 mod netif;
@@ -121,6 +122,7 @@ fn real_main(cli: Cli) -> Result<()> {
         cfg.global.size = s.clone();
     }
     cfg.validate()?;
+    font::set_scale(cfg.global.font_scale);
     let rot = Rotation::from_degrees(cfg.global.rotate).expect("validated");
 
     let open_opts = |backlight: Option<u8>| OpenOptions {

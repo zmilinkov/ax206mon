@@ -28,6 +28,8 @@ pub struct Global {
     pub rotate: u16,
     /// Backlight level 0-7 set when the display is opened.
     pub backlight: u8,
+    /// Multiplier on all text sizes (0.6 - 1.3).
+    pub font_scale: f32,
     /// Turn the backlight off when the service stops.
     pub backlight_off_on_exit: bool,
     /// Seconds between redraws of the current page (a frame takes ~1.2 s to send).
@@ -267,6 +269,7 @@ impl Default for Global {
         Self {
             rotate: 270,
             backlight: 7,
+            font_scale: 1.0,
             backlight_off_on_exit: true,
             refresh_interval: 2.0,
             page_duration: 15.0,
@@ -344,6 +347,9 @@ impl Config {
         }
         if g.backlight > 7 {
             bail!("global.backlight must be 0-7 (got {})", g.backlight);
+        }
+        if !(0.6..=1.3).contains(&g.font_scale) {
+            bail!("global.font_scale must be between 0.6 and 1.3 (got {})", g.font_scale);
         }
         if !(0.1..=3600.0).contains(&g.refresh_interval) {
             bail!("global.refresh_interval must be between 0.1 and 3600 seconds");

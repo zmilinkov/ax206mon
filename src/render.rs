@@ -1,15 +1,14 @@
 //! Drawing: dashboard pages, a test pattern and image fitting.
 //! Layout adapts to landscape (480x320) and portrait (320x480) canvases.
 
-use embedded_graphics::mono_font::{MonoFont, MonoTextStyle};
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{PrimitiveStyle, Rectangle, RoundedRectangle};
-use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
-use profont::{PROFONT_12_POINT, PROFONT_14_POINT, PROFONT_18_POINT, PROFONT_24_POINT};
+use embedded_graphics::text::Alignment;
 
 use crate::config::{Global, Kind, Page};
 use crate::docker::DockerStatus;
+use crate::font::{self, TextSize};
 use crate::frame::Frame;
 use crate::netif::{self, Iface};
 use crate::services::{self, Filter, Unit};
@@ -66,32 +65,8 @@ impl Clock {
     }
 }
 
-fn text(f: &mut Frame, s: &str, pos: Point, font: &MonoFont, color: Rgb888, align: Alignment) {
-    let style = MonoTextStyle::new(font, color);
-    let ts = TextStyleBuilder::new()
-        .alignment(align)
-        .baseline(Baseline::Top)
-        .build();
-    let _ = Text::with_text_style(s, pos, style, ts).draw(f);
-}
-
-/// Draw text enlarged by an integer factor (for the big clock).
-fn text_scaled(
-    f: &mut Frame,
-    s: &str,
-    center_x: i32,
-    top: i32,
-    font: &MonoFont,
-    color: Rgb888,
-    scale: u32,
-) {
-    let cw = font.character_size.width + font.character_spacing;
-    let w = cw * s.chars().count() as u32;
-    let h = font.character_size.height;
-    let key = Rgb888::new(1, 2, 3); // transparency key
-    let mut tmp = Frame::new(w.max(1), h, key);
-    text(&mut tmp, s, Point::zero(), font, color, Alignment::Left);
-    f.blit_scaled(&tmp, center_x - (w * scale) as i32 / 2, top, scale, key);
+fn text(f: &mut Frame, s: &str, pos: Point, size: TextSize, color: Rgb888, align: Alignment) {
+    font::draw(f, s, pos.x, pos.y, size.font(), color, align);
 }
 
 /// One segment of a (possibly stacked) bar.
@@ -155,20 +130,20 @@ enum Style {
     Stacked,
     /// Label, bar and value on one line.
     Line {
-        label: &'static MonoFont<'static>,
-        value: &'static MonoFont<'static>,
+        label: TextSize,
+        value: TextSize,
         bar_h: u32,
     },
 }
 
 const LINE_MAIN: Style = Style::Line {
-    label: &PROFONT_18_POINT,
-    value: &PROFONT_14_POINT,
+    label: TextSize::Big,
+    value: TextSize::Mid,
     bar_h: 12,
 };
 const LINE_SUB: Style = Style::Line {
-    label: &PROFONT_14_POINT,
-    value: &PROFONT_12_POINT,
+    label: TextSize::Mid,
+    value: TextSize::Small,
     bar_h: 8,
 };
 const BAR_H: u32 = 12;
@@ -182,12 +157,12 @@ fn style_for(portrait: bool, row: usize) -> Style {
     }
 }
 
-fn char_w(font: &MonoFont) -> i32 {
-    (font.character_size.width + font.character_spacing) as i32
+fn char_w(size: TextSize) -> i32 {
+    size.w()
 }
 
-fn char_h(font: &MonoFont) -> i32 {
-    font.character_size.height as i32
+fn char_h(size: TextSize) -> i32 {
+    size.h()
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -211,9 +186,9 @@ fn bar_height(b: &Bar, style: Style, gap: i32) -> i32 {
             let legend = if b.legend.is_empty() {
                 0
             } else {
-                3 + char_h(&PROFONT_12_POINT)
+                3 + char_h(TextSize::Small)
             };
-            char_h(&PROFONT_18_POINT) + 4 + BAR_H as i32 + legend + gap
+            char_h(TextSize::Big) + 4 + BAR_H as i32 + legend + gap
         }
         Style::Line { label, bar_h, .. } => char_h(label).max(bar_h as i32) + gap,
     }
@@ -264,13 +239,13 @@ fn draw_bar_row(f: &mut Frame, x: i32, y: i32, w: i32, b: &Bar, style: Style, ga
     let label_color = if b.hot { WARN } else { b.color };
     match style {
         Style::Stacked => {
-            let font = &PROFONT_18_POINT;
+            let font = TextSize::Big;
             text(f, &b.label, Point::new(x, y), font, label_color, Alignment::Left);
             text(f, &b.value, Point::new(x + w, y), font, TEXT, Alignment::Right);
             let bar_y = y + char_h(font) + 4;
             bar(f, x, bar_y, w as u32, BAR_H, &b.segs);
             let mut lx = x;
-            let lfont = &PROFONT_12_POINT;
+            let lfont = TextSize::Small;
             let ly = bar_y + BAR_H as i32 + 3;
             for (name, color) in &b.legend {
                 let _ = Rectangle::new(Point::new(lx, ly + 4), Size::new(6, 6))
@@ -507,39 +482,40 @@ fn header_look(v: usize, portrait: bool, slack: i32) -> (i32, i32, Rgb888) {
 fn draw_header(f: &mut Frame, info: &PageInfo, clock: &Clock, portrait: bool) -> i32 {
     let w = f.width() as i32;
     let margin = 16;
-    let font = &PROFONT_24_POINT;
-    let cw = char_w(font) * clock.time.chars().count() as i32;
     let avail = if portrait { w - 2 * margin } else { w / 2 - margin };
-    let scale = [3u32, 2, 1]
-        .into_iter()
-        .find(|&sc| cw * sc as i32 <= avail)
-        .unwrap_or(1);
-    let clock_h = char_h(font) * scale as i32;
+    // The clock is the largest size that fits the space, up to a cap.
+    let max_px = if portrait { 80.0 } else { 54.0 } * font::scale();
+    let clock_font = font::Font::px(font::fit_px(avail, clock.time.chars().count(), max_px));
+    let cw = clock_font.w() * clock.time.chars().count() as i32;
+    let clock_h = clock_font.h();
     let indicator = if info.count > 1 {
         format!("{}/{}", info.index + 1, info.count)
     } else {
         String::new()
     };
-    let name = truncate(&info.page.name, 14);
-    let slack = avail - cw * scale as i32;
+    let slack = avail - cw;
     let (dx, dy, clock_color) = header_look(info.variant, portrait, slack / 2);
+    // In portrait the page name shares the date's line: keep clear of the date.
+    let date_w = char_w(TextSize::Mid) * clock.date.chars().count() as i32;
+    let name_room = (w / 2 + dx - date_w / 2 - margin - 6) / char_w(TextSize::Small).max(1);
+    let name = truncate(&info.page.name, if portrait { name_room.clamp(1, 14) as usize } else { 14 });
     if portrait {
-        text_scaled(f, &clock.time, w / 2 + dx, 8 + dy, font, clock_color, scale);
+        font::draw(f, &clock.time, w / 2 + dx, 8 + dy, clock_font, clock_color, Alignment::Center);
         let sub_y = 8 + dy + clock_h + 2;
-        text(f, &clock.date, Point::new(w / 2 + dx, sub_y), &PROFONT_14_POINT, MUTED, Alignment::Center);
+        text(f, &clock.date, Point::new(w / 2 + dx, sub_y), TextSize::Mid, MUTED, Alignment::Center);
         if info.count > 1 {
-            let small = &PROFONT_12_POINT;
-            let y = sub_y + (char_h(&PROFONT_14_POINT) - char_h(small)) / 2;
+            let small = TextSize::Small;
+            let y = sub_y + (char_h(TextSize::Mid) - char_h(small)) / 2;
             text(f, &name, Point::new(margin, y), small, MUTED, Alignment::Left);
             text(f, &indicator, Point::new(w - margin, y), small, MUTED, Alignment::Right);
         }
-        8 + HEADER_DY_MAX + clock_h + 2 + char_h(&PROFONT_14_POINT) + 8
+        8 + HEADER_DY_MAX + clock_h + 2 + char_h(TextSize::Mid) + 8
     } else {
-        text_scaled(f, &clock.time, margin + dx + cw * scale as i32 / 2, 8 + dy, font, clock_color, scale);
-        text(f, &clock.date, Point::new(w - margin, 12), &PROFONT_14_POINT, MUTED, Alignment::Right);
+        font::draw(f, &clock.time, margin + dx, 8 + dy, clock_font, clock_color, Alignment::Left);
+        text(f, &clock.date, Point::new(w - margin, 12), TextSize::Mid, MUTED, Alignment::Right);
         if info.count > 1 {
-            let small = &PROFONT_12_POINT;
-            let y = 12 + char_h(&PROFONT_14_POINT) + 6;
+            let small = TextSize::Small;
+            let y = 12 + char_h(TextSize::Mid) + 6;
             text(f, &format!("{name}  {indicator}"), Point::new(w - margin, y), small, MUTED, Alignment::Right);
         }
         8 + HEADER_DY_MAX + clock_h + 6
@@ -563,16 +539,18 @@ fn draw_status(f: &mut Frame, y: i32, s: &Snapshot, portrait: bool) {
             human_rate(s.net_tx_bps)
         )
     };
-    let font = &PROFONT_12_POINT;
+    let font = TextSize::Small;
     text(f, &left, Point::new(10, ty), font, MUTED, Alignment::Left);
     text(f, &right, Point::new(w - 10, ty), font, MUTED, Alignment::Right);
 }
 
-const DOCKER_STATUS_H: i32 = 22 + 4 + 2 * 19 + 10;
+fn docker_status_h() -> i32 {
+    char_h(TextSize::Big) + 4 + 2 * (char_h(TextSize::Mid) + 3) + 10
+}
 
 fn draw_docker_status(f: &mut Frame, x: i32, y: i32, w: i32, d: &DockerStatus) {
-    let title = &PROFONT_18_POINT;
-    let small = &PROFONT_14_POINT;
+    let title = TextSize::Big;
+    let small = TextSize::Mid;
     let (state, color) = if d.up() {
         ("UP", RAM)
     } else {
@@ -617,8 +595,8 @@ fn unit_color(u: &Unit) -> Rgb888 {
 
 /// Services that fit in the available height; the rest are dropped.
 fn draw_services(f: &mut Frame, (x, y, w, h): (i32, i32, i32, i32), title: &str, error: Option<&str>, units: &[Unit]) {
-    let big = &PROFONT_18_POINT;
-    let small = &PROFONT_14_POINT;
+    let big = TextSize::Big;
+    let small = TextSize::Mid;
     text(f, title, Point::new(x, y), big, DOCKER, Alignment::Left);
     let count = if error.is_some() { "-".to_string() } else { units.len().to_string() };
     text(f, &count, Point::new(x + w, y), big, TEXT, Alignment::Right);
@@ -648,9 +626,9 @@ fn draw_services(f: &mut Frame, (x, y, w, h): (i32, i32, i32, i32), title: &str,
 
 /// Interfaces with their addresses; whatever doesn't fit is dropped.
 fn draw_network(f: &mut Frame, (x, y, w, h): (i32, i32, i32, i32), title: &str, ifaces: &[Iface], mac: bool) {
-    let big = &PROFONT_18_POINT;
-    let name_font = &PROFONT_14_POINT;
-    let addr_font = &PROFONT_12_POINT;
+    let big = TextSize::Big;
+    let name_font = TextSize::Mid;
+    let addr_font = TextSize::Small;
     text(f, title, Point::new(x, y), big, DOCKER, Alignment::Left);
     text(f, &ifaces.len().to_string(), Point::new(x + w, y), big, TEXT, Alignment::Right);
     let mut ry = y + char_h(big) + 6;
@@ -690,8 +668,8 @@ fn draw_network(f: &mut Frame, (x, y, w, h): (i32, i32, i32, i32), title: &str, 
 }
 
 fn draw_docker_stacks(f: &mut Frame, x: i32, y: i32, w: i32, h: i32, d: &DockerStatus) {
-    let title = &PROFONT_18_POINT;
-    let small = &PROFONT_14_POINT;
+    let title = TextSize::Big;
+    let small = TextSize::Mid;
     text(f, "STACKS", Point::new(x, y), title, DOCKER, Alignment::Left);
     let count = if d.up() { format!("{}", d.stacks.len()) } else { "-".into() };
     text(f, &count, Point::new(x + w, y), title, TEXT, Alignment::Right);
@@ -757,7 +735,7 @@ pub fn render_page(
     let avail = h - header_h - status_count * STATUS_H - 4;
     let natural = |i: &Item, gap: i32| match i {
         Item::Bars(b) => bars_height(b, portrait, gap),
-        Item::DockerStatus(_) => DOCKER_STATUS_H,
+        Item::DockerStatus(_) => docker_status_h(),
         _ => 0,
     };
     let is_flex = |i: &Item| matches!(i, Item::DockerStacks(_) | Item::Services { .. } | Item::Network { .. });
@@ -783,6 +761,10 @@ pub fn render_page(
         match item {
             Item::Bars(bars) => {
                 let nat = bars_height(bars, portrait, gap);
+                // Whatever does not fit above the footer is left out, not overlapped.
+                if y + nat > h - status_count * STATUS_H {
+                    continue;
+                }
                 let slot = (nat as f32 * scale) as i32;
                 // Centre the rows in their slot so spare space is spread evenly.
                 let mut ry = y + (slot - nat).max(0) / 2;
@@ -793,7 +775,7 @@ pub fn render_page(
             }
             Item::DockerStatus(d) => {
                 draw_docker_status(&mut f, margin, y, cw, d);
-                y += (DOCKER_STATUS_H as f32 * scale) as i32;
+                y += (docker_status_h() as f32 * scale) as i32;
             }
             Item::DockerStacks(d) => {
                 draw_docker_stacks(&mut f, margin, y, cw, flex_h, d);
@@ -844,7 +826,7 @@ pub fn test_pattern(width: u32, height: u32) -> Frame {
     let label = format!("{width}x{height}  TOP-LEFT");
     let _ = Rectangle::new(
         Point::new(30, 2),
-        Size::new(12 * label.len() as u32 + 8, 26),
+        Size::new(char_w(TextSize::Big) as u32 * label.chars().count() as u32 + 8, 30),
     )
     .into_styled(PrimitiveStyle::with_fill(Rgb888::BLACK))
     .draw(&mut f);
@@ -852,7 +834,7 @@ pub fn test_pattern(width: u32, height: u32) -> Frame {
         &mut f,
         &label,
         Point::new(34, 4),
-        &PROFONT_18_POINT,
+        TextSize::Big,
         Rgb888::WHITE,
         Alignment::Left,
     );
@@ -939,6 +921,22 @@ mod tests {
                 }
             }
         }
+        // The smallest and largest font scales must not panic or overflow.
+        for scale in [0.6, 1.3] {
+            font::set_scale(scale);
+            for (i, page) in cfg.pages.iter().enumerate() {
+                let info = PageInfo { page, index: i, count: cfg.pages.len(), variant: 0 };
+                for (cw, ch) in [(480, 320), (320, 480)] {
+                    let f = render_page(cw, ch, &info, &cfg.global, &s, &c);
+                    if let Some(d) = &dump {
+                        f.to_rgb_image()
+                            .save(std::path::Path::new(d).join(format!("scale{scale}_page{}_{cw}x{ch}.png", i + 1)))
+                            .unwrap();
+                    }
+                }
+            }
+        }
+        font::set_scale(1.0);
         // Every header variant renders at both sizes (dumped for a visual check).
         for v in 0..crate::burnin::VARIANTS {
             for (cw, ch) in [(480, 320), (320, 480)] {

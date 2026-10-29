@@ -19,7 +19,7 @@ echo "==> $(rustc --version) on $(. /etc/os-release; echo "$PRETTY_NAME")"
 work=$(mktemp -d)
 tree="$work/$name-$version"
 mkdir -p "$tree"
-cp -a "$src"/{Cargo.toml,Cargo.lock,LICENSE,README.md,src,packaging,.cargo} "$tree/"
+cp -a "$src"/{Cargo.toml,Cargo.lock,LICENSE,README.md,src,assets,packaging,.cargo} "$tree/"
 
 echo "==> vendoring crates"
 (cd "$tree" && cargo vendor --locked --versioned-dirs vendor >> .cargo/config.toml)

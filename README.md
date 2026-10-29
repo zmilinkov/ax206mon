@@ -60,6 +60,13 @@ full-screen colour refresh. See `packaging/ax206mon.conf`.
   by the systemd unit) or `perf_event_paranoid <= 0` when run by hand. Arc GPUs
   on the newer `xe` driver are not supported yet.
 
+## Fonts
+
+Text is drawn with the bundled [Noto Sans Mono](https://github.com/notofonts/notofonts.github.io)
+Regular (SIL Open Font License 1.1, see `assets/fonts/`), rendered anti-aliased
+at any size. `[global] font_scale` (0.6 - 1.3) scales all text; larger text means
+fewer rows fit, and widgets that no longer fit above the footer are left out.
+
 ## Build
 
 `./build-rpm.sh` builds an RPM in an AlmaLinux container; `cargo build --release`

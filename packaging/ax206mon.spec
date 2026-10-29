@@ -8,7 +8,8 @@ Name:           ax206mon
 Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Status dashboard for AX206-protocol USB mini displays
-License:        MIT
+# The binary embeds Noto Sans Mono (SIL OFL 1.1), see assets/fonts.
+License:        MIT AND OFL-1.1
 URL:            https://github.com/
 Source0:        %{name}-%{version}.tar.gz
 
@@ -64,6 +65,7 @@ udevadm trigger --subsystem-match=usb --attr-match=idVendor=1908 >/dev/null 2>&1
 
 %files
 %license LICENSE
+%license assets/fonts/OFL.txt
 %doc README.md
 %{_bindir}/%{name}
 %{_unitdir}/%{name}.service
