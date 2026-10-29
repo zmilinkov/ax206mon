@@ -6,6 +6,7 @@ mod frame;
 mod gpu;
 mod netif;
 mod render;
+mod schedule;
 mod services;
 mod stats;
 
@@ -238,6 +239,8 @@ fn needs_for(cfg: &Config, idx: usize) -> stats::Needs {
             }
         }
     }
+    // The busy schedule watches GPU load even when no page shows it.
+    n.gpu |= cfg.busy.enabled;
     let on_page = |f: fn(Kind) -> bool| cfg.pages[idx].widgets.iter().any(|w| f(w.kind));
     n.docker = on_page(|k| matches!(k, Kind::DockerStatus | Kind::DockerStacks));
     n.services = on_page(|k| k == Kind::Services);
@@ -267,8 +270,10 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
     let interval = Duration::from_secs_f64(cfg.global.refresh_interval);
     let mut collector = stats::Collector::new(stats_opts(cfg));
     let mut reported_missing = false;
-    let mut page = 0usize;
-    let mut page_since = Instant::now();
+    let mut schedule = schedule::Schedule::new(Instant::now());
+    let mut detector = schedule::BusyDetector::new();
+    // Load seen in the previous snapshot; the page is chosen before the next one is taken.
+    let mut load = 0.0f32;
     let refresh_every = (cfg.burnin.idle_refresh_hours > 0.0)
         .then(|| Duration::from_secs_f64(cfg.burnin.idle_refresh_hours * 3600.0));
     let mut last_refresh = Instant::now();
@@ -326,10 +331,8 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
                 continue;
             }
 
-            if page_since.elapsed().as_secs_f64() >= cfg.page_duration(page) {
-                page = (page + 1) % cfg.pages.len();
-                page_since = started;
-            }
+            let busy = detector.update(started, load, cfg);
+            let page = schedule.update(started, busy, cfg);
             let info = render::PageInfo {
                 page: &cfg.pages[page],
                 index: page,
@@ -337,6 +340,11 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
                 variant: variant_for(cfg, page, &clock),
             };
             let snap = collector.snapshot(&needs_for(cfg, page));
+            load = snap
+                .gpus
+                .iter()
+                .filter_map(|g| g.load)
+                .fold(snap.cpu.busy, f32::max);
             let frame = render::render_page(w, h, &info, &cfg.global, &snap, &clock);
             if let Err(e) = show(&mut d, &frame, rot) {
                 warn!("lost the display: {e:#}");

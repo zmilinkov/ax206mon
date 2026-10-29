@@ -14,6 +14,7 @@ pub const DEFAULT_PATH: &str = "/etc/ax206mon/ax206mon.conf";
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub global: Global,
+    pub busy: Busy,
     pub burnin: Burnin,
     /// Dashboard pages, shown in order. Defaults to the built-in pages.
     #[serde(rename = "page")]
@@ -45,6 +46,34 @@ pub struct Global {
     pub size: String,
     /// Frame data chunk size in bytes (Windows driver uses 262144).
     pub chunk_size: usize,
+}
+
+/// Page schedule while the machine is busy.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Busy {
+    /// Use the busy schedule at all.
+    pub enabled: bool,
+    /// CPU (processing) or GPU load in percent above which the machine counts as busy.
+    pub load_threshold: f32,
+    /// Seconds page 1 stays up in the busy sequence.
+    pub main_page_seconds: f64,
+    /// Seconds every other page stays up in the busy sequence.
+    pub other_page_seconds: f64,
+    /// Seconds the load must stay below the threshold before leaving busy mode.
+    pub hold_seconds: f64,
+}
+
+impl Default for Busy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            load_threshold: 30.0,
+            main_page_seconds: 12.0,
+            other_page_seconds: 8.0,
+            hold_seconds: 10.0,
+        }
+    }
 }
 
 /// Screen-protection options: night backlight, header variation, idle refresh.
@@ -252,6 +281,7 @@ impl Default for Config {
         let w = |kinds: &[Kind]| kinds.iter().map(|&k| Widget::new(k)).collect();
         Self {
             global: Global::default(),
+            busy: Busy::default(),
             burnin: Burnin::default(),
             pages: vec![
                 Page {
@@ -315,6 +345,21 @@ impl Config {
         }
         if !(1.0..=86_400.0).contains(&g.page_duration) {
             bail!("global.page_duration must be between 1 and 86400 seconds");
+        }
+        let busy = &self.busy;
+        if !(1.0..=100.0).contains(&busy.load_threshold) {
+            bail!("busy.load_threshold must be between 1 and 100 percent");
+        }
+        for (name, v) in [
+            ("main_page_seconds", busy.main_page_seconds),
+            ("other_page_seconds", busy.other_page_seconds),
+        ] {
+            if !(1.0..=86_400.0).contains(&v) {
+                bail!("busy.{name} must be between 1 and 86400 seconds");
+            }
+        }
+        if !(0.0..=3600.0).contains(&busy.hold_seconds) {
+            bail!("busy.hold_seconds must be between 0 and 3600 seconds");
         }
         let b = &self.burnin;
         match (b.night_start.is_empty(), b.night_end.is_empty()) {
@@ -452,6 +497,19 @@ mod tests {
         )
         .unwrap();
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn busy_defaults_and_validation() {
+        let d = Config::default();
+        assert_eq!(
+            (d.busy.load_threshold, d.busy.main_page_seconds, d.busy.other_page_seconds),
+            (30.0, 12.0, 8.0)
+        );
+        for bad in ["[busy]\nload_threshold = 0", "[busy]\nmain_page_seconds = 0", "[busy]\nhold_seconds = -1"] {
+            let c: Config = toml::from_str(bad).unwrap();
+            assert!(c.validate().is_err(), "{bad}");
+        }
     }
 
     #[test]

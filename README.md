@@ -38,6 +38,13 @@ per page listing its widgets. Pass another file with `-c`.
 
 Preview a page without hardware: `ax206mon preview --page 2 out.png`.
 
+## Busy schedule
+
+When the CPU or GPU load is above `[busy] load_threshold` (default 30 %), page 1
+stays up for 12 s and then alternates with the other pages (1, 2, 1, 3, 1, 4, ...,
+8 s each). Below the threshold the normal rotation applies. See
+`packaging/ax206mon.conf`.
+
 ## Screen protection
 
 The `[burnin]` table helps against LCD image retention from the static clock:
