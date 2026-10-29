@@ -415,7 +415,11 @@ fn build_items<'a>(page: &Page, global: &Global, s: &'a Snapshot) -> Vec<Item<'a
                 };
                 if let Some(g) = g {
                     let pct = |v: Option<f32>| v.map_or("n/a".to_string(), |v| format!("{v:.0}%"));
-                    let mut main = Bar::simple(label("GPU"), pct(g.load), g.load.unwrap_or(0.0) / 100.0, GPU);
+                    let mut value = pct(g.load);
+                    if let Some(t) = g.temp_c.filter(|_| w.temp.unwrap_or(true)) {
+                        value = format!("{value}  {t:.0}\u{b0}C");
+                    }
+                    let mut main = Bar::simple(label("GPU"), value, g.load.unwrap_or(0.0) / 100.0, GPU);
                     if g.load.is_none() {
                         main.hot = false;
                     }
@@ -898,6 +902,7 @@ mod tests {
                     crate::gpu::GpuRow { label: "VID", pct: Some(35.0) },
                 ],
                 vram: None,
+                temp_c: Some(58.0),
             }],
             interfaces: Some(crate::netif::list()),
             services: Some(crate::services::ServiceList {
