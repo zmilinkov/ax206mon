@@ -18,6 +18,10 @@ const ADVANCE: f32 = 0.6;
 /// Line box height and baseline position, as fractions of the pixel size.
 const LINE_H: f32 = 1.12;
 const BASELINE: f32 = 0.86;
+/// Height of digits relative to `px`. Note `px` is ab_glyph's PxScale, i.e.
+/// the font's full ascent+descent height (1.362 em for Noto Sans Mono), not
+/// the em size: digits are 0.714 em = 0.52-0.54 of `px`.
+const CAP_H: f32 = 0.54;
 
 thread_local! {
     /// Multiplier on all text sizes (`global.font_scale`). Per thread: the
@@ -84,6 +88,16 @@ impl Font {
 
     pub fn h(self) -> i32 {
         (self.px * LINE_H).round() as i32
+    }
+
+    /// Height of digits/capitals in pixels.
+    pub fn cap_h(self) -> i32 {
+        (self.px * CAP_H).round() as i32
+    }
+
+    /// Distance from the top of the line box to the top of digits/capitals.
+    pub fn cap_offset(self) -> i32 {
+        self.baseline() - self.cap_h()
     }
 
     fn baseline(self) -> i32 {
@@ -213,6 +227,18 @@ mod tests {
             for c in "0123456789:/%.-~+!\u{b0}abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".chars() {
                 assert_ne!(font.glyph_id(c).0, 0, "missing {c:?}");
             }
+        });
+    }
+
+    #[test]
+    fn cap_height_constant_matches_the_font() {
+        FONT.with(|font| {
+            let g = font
+                .glyph_id('0')
+                .with_scale_and_position(PxScale::from(1000.0), point(0.0, 0.0));
+            let h = font.outline_glyph(g).unwrap().px_bounds().height();
+            // Digits are a touch taller than capitals (overshoot); allow 3 %.
+            assert!((h / 1000.0 - CAP_H).abs() < 0.03, "digit height {}", h / 1000.0);
         });
     }
 
