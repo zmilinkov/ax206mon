@@ -44,6 +44,10 @@ pub struct Global {
     pub temp_file: String,
     /// Docker Engine API socket.
     pub docker_socket: String,
+    /// Seconds a docker status is reused before asking the engine again; 0 = every refresh.
+    pub docker_cache_seconds: f64,
+    /// Seconds a systemctl service list is reused before running it again; 0 = every refresh.
+    pub services_cache_seconds: f64,
     /// Panel size as "WxH"; empty = ask the display.
     pub size: String,
     /// Frame data chunk size in bytes (Windows driver uses 262144).
@@ -282,6 +286,8 @@ impl Default for Global {
             net_interface: String::new(),
             temp_file: String::new(),
             docker_socket: crate::docker::DEFAULT_SOCKET.into(),
+            docker_cache_seconds: 10.0,
+            services_cache_seconds: 10.0,
             size: String::new(),
             chunk_size: crate::ax206::DEFAULT_CHUNK,
         }
@@ -356,6 +362,14 @@ impl Config {
         }
         if g.backlight > 7 {
             bail!("global.backlight must be 0-7 (got {})", g.backlight);
+        }
+        for (name, v) in [
+            ("docker_cache_seconds", g.docker_cache_seconds),
+            ("services_cache_seconds", g.services_cache_seconds),
+        ] {
+            if !(0.0..=3600.0).contains(&v) {
+                bail!("global.{name} must be between 0 (no caching) and 3600 seconds");
+            }
         }
         if !(0.6..=1.3).contains(&g.font_scale) {
             bail!("global.font_scale must be between 0.6 and 1.3 (got {})", g.font_scale);

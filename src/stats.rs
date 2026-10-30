@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::docker::{self, DockerStatus};
 use crate::gpu::{self, GpuStat};
@@ -85,6 +85,10 @@ pub struct Options {
     pub net_iface: Option<String>,
     /// Explicit temperature file (millidegrees), else auto-detect.
     pub temp_file: Option<PathBuf>,
+    /// How long a systemctl service list is reused; zero = query every time.
+    pub services_cache: Duration,
+    /// How long a docker status is reused; zero = query every time.
+    pub docker_cache: Duration,
 }
 
 impl Default for Options {
@@ -93,12 +97,38 @@ impl Default for Options {
             docker_socket: docker::DEFAULT_SOCKET.into(),
             net_iface: None,
             temp_file: None,
+            services_cache: Duration::ZERO,
+            docker_cache: Duration::ZERO,
+        }
+    }
+}
+
+/// A value reused until it is `ttl` old; a zero `ttl` never reuses.
+pub struct Cached<T> {
+    value: Option<(Instant, T)>,
+}
+
+impl<T: Clone> Cached<T> {
+    pub fn new() -> Self {
+        Self { value: None }
+    }
+
+    pub fn get(&mut self, now: Instant, ttl: Duration, fetch: impl FnOnce() -> T) -> T {
+        match &self.value {
+            Some((at, v)) if !ttl.is_zero() && now.duration_since(*at) < ttl => v.clone(),
+            _ => {
+                let v = fetch();
+                self.value = Some((now, v.clone()));
+                v
+            }
         }
     }
 }
 
 pub struct Collector {
     opts: Options,
+    services: Cached<ServiceList>,
+    docker: Cached<DockerStatus>,
     temp_file: Option<PathBuf>,
     prev_cpu: Option<[u64; 3]>,
     gpus: Option<Vec<gpu::Probe>>,
@@ -115,6 +145,8 @@ impl Collector {
         }
         let mut c = Self {
             opts,
+            services: Cached::new(),
+            docker: Cached::new(),
             temp_file,
             prev_cpu: None,
             gpus: None,
@@ -147,10 +179,13 @@ impl Collector {
                 .filter_map(|p| Some((p.clone(), disk_usage(p)?)))
                 .collect(),
             gpus,
-            docker: needs
-                .docker
-                .then(|| docker::query(&self.opts.docker_socket)),
-            services: needs.services.then(services::query),
+            docker: needs.docker.then(|| {
+                let socket = &self.opts.docker_socket;
+                self.docker.get(Instant::now(), self.opts.docker_cache, || docker::query(socket))
+            }),
+            services: needs
+                .services
+                .then(|| self.services.get(Instant::now(), self.opts.services_cache, services::query)),
             interfaces: needs.interfaces.then(netif::list),
             temp_c: self.temp_file.as_deref().and_then(read_millideg),
             load1: loadavg().unwrap_or(0.0),
@@ -366,6 +401,24 @@ fn find_cpu_temp_sensor() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_reuses_until_ttl_and_zero_disables() {
+        let t0 = Instant::now();
+        let mut calls = 0;
+        let mut c = Cached::new();
+        let ttl = Duration::from_secs(10);
+        let mut fetch = |c: &mut Cached<u32>, t| c.get(t, ttl, || { calls += 1; calls });
+        assert_eq!(fetch(&mut c, t0), 1);
+        assert_eq!(fetch(&mut c, t0 + Duration::from_secs(9)), 1, "reused");
+        assert_eq!(fetch(&mut c, t0 + Duration::from_secs(10)), 2, "expired");
+        let mut n = 0;
+        let mut z = Cached::new();
+        for i in 0..3 {
+            z.get(t0 + Duration::from_secs(i), Duration::ZERO, || { n += 1; n });
+        }
+        assert_eq!(n, 3, "zero ttl never caches");
+    }
 
     #[test]
     fn cpu_line_splits_busy_and_iowait() {

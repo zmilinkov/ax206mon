@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           ax206mon
-Version:        0.3.0
+Version:        0.3.1
 Release:        1%{?dist}
 Summary:        Status dashboard for AX206-protocol USB mini displays
 # The binary embeds Noto Sans Mono (SIL OFL 1.1), see assets/fonts.
@@ -74,6 +74,13 @@ udevadm trigger --subsystem-match=usb --attr-match=idVendor=1908 >/dev/null 2>&1
 %config(noreplace) %{_sysconfdir}/%{name}/%{name}.conf
 
 %changelog
+* Fri Oct 30 2026 Zeljko Milinkov <zeljko.milinkov@gmail.com> - 0.3.1-1
+- Don't resend a frame identical to the one already on the display
+- Faster frame conversion, reusing its buffer instead of allocating per frame
+- Sleep on a signal pipe instead of waking every 100 ms to check for stop
+- Cache the systemctl service list and docker status (docker_cache_seconds,
+  services_cache_seconds, default 10, 0 = off)
+
 * Thu Oct 29 2026 Zeljko Milinkov <zeljko.milinkov@gmail.com> - 0.3.0-1
 - Pages: services, network interfaces and compose stacks, with per-widget options
 - Busy schedule: page 1 alternates with the other pages under CPU/GPU load

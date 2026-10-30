@@ -218,6 +218,8 @@ fn stats_opts(cfg: &Config) -> stats::Options {
         docker_socket: g.docker_socket.clone(),
         net_iface: Some(g.net_interface.clone()).filter(|s| !s.is_empty()),
         temp_file: Some(PathBuf::from(&g.temp_file)).filter(|p| !p.as_os_str().is_empty()),
+        services_cache: Duration::from_secs_f64(g.services_cache_seconds),
+        docker_cache: Duration::from_secs_f64(g.docker_cache_seconds),
     }
 }
 
@@ -264,10 +266,7 @@ fn show(d: &mut Display, f: &Frame, rot: Rotation) -> Result<()> {
 /// Service loop: keep the dashboard on screen, reopening the display
 /// whenever it is unplugged or not there yet.
 fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
-    let stop = Arc::new(AtomicBool::new(false));
-    for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
-        signal_hook::flag::register(sig, Arc::clone(&stop)).context("installing signal handler")?;
-    }
+    let stop = Stop::install()?;
 
     let interval = Duration::from_secs_f64(cfg.global.refresh_interval);
     let mut collector = stats::Collector::new(stats_opts(cfg));
@@ -290,7 +289,7 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
         .then(|| Duration::from_secs_f64(cfg.burnin.idle_refresh_hours * 3600.0));
     let mut last_refresh = Instant::now();
 
-    while !stop.load(Ordering::Relaxed) {
+    while !stop.is_set() {
         let mut level = backlight_for(cfg, render::Clock::now().minute_of_day);
         let open = OpenOptions {
             backlight: Some(level),
@@ -306,13 +305,18 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
                     warn!("{e}; waiting for the display");
                     reported_missing = true;
                 }
-                sleep_unless_stopped(Duration::from_secs(3), &stop);
+                stop.sleep(Duration::from_secs(3));
                 continue;
             }
         };
 
         let (w, h) = rot.canvas_size(d.width().into(), d.height().into());
-        while !stop.load(Ordering::Relaxed) {
+        // Last frame sent in the panel's format; an identical frame is not
+        // sent again (it would only repeat a ~1.2 s USB transfer). Reset on
+        // every (re)open, so a replugged display always gets a full frame.
+        let mut sent: Vec<u8> = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+        while !stop.is_set() {
             let started = Instant::now();
             let clock = render::Clock::now();
 
@@ -335,11 +339,12 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
                     break;
                 }
                 last_refresh = Instant::now();
+                sent.clear(); // the screen no longer shows the last page
                 continue;
             }
 
             if night_dark(cfg, clock.minute_of_day) {
-                sleep_unless_stopped(Duration::from_secs(10), &stop);
+                stop.sleep(Duration::from_secs(10));
                 continue;
             }
 
@@ -367,15 +372,21 @@ fn run(cfg: &Config, rot: Rotation, opts: OpenOptions) -> Result<()> {
             detector.sample(Instant::now(), snap.cpu.total(), gpu, cfg);
             log::debug!("load sample: cpu {:.0}% gpu {gpu:.0}%", snap.cpu.total());
             let frame = render::render_page(w, h, &info, &cfg.global, &snap, &clock);
-            if let Err(e) = show(&mut d, &frame, rot) {
-                warn!("lost the display: {e:#}");
-                break;
+            frame.to_panel_rgb565_into(rot, d.width().into(), d.height().into(), &mut buf);
+            if buf == sent {
+                log::debug!("page {} unchanged, not sent", page + 1);
+            } else {
+                if let Err(e) = d.blit_full(&buf) {
+                    warn!("lost the display: {e:#}");
+                    break;
+                }
+                std::mem::swap(&mut buf, &mut sent);
+                log::debug!("page {} sent in {:?}", page + 1, started.elapsed());
             }
-            log::debug!("page {} sent in {:?}", page + 1, started.elapsed());
-            sleep_unless_stopped(interval.saturating_sub(started.elapsed()), &stop);
+            stop.sleep(interval.saturating_sub(started.elapsed()));
         }
 
-        if stop.load(Ordering::Relaxed) && cfg.global.backlight_off_on_exit {
+        if stop.is_set() && cfg.global.backlight_off_on_exit {
             let _ = d.set_backlight(0);
         }
     }
@@ -417,28 +428,84 @@ fn refresh_cycle(
     w: u32,
     h: u32,
     secs: f64,
-    stop: &AtomicBool,
+    stop: &Stop,
 ) -> Result<()> {
     use embedded_graphics::pixelcolor::Rgb888;
     use embedded_graphics::prelude::RgbColor;
     let colors = [Rgb888::BLACK, Rgb888::WHITE, Rgb888::RED, Rgb888::GREEN, Rgb888::BLUE];
     let end = Instant::now() + Duration::from_secs_f64(secs);
     let mut i = 0;
-    while Instant::now() < end && !stop.load(Ordering::Relaxed) {
+    while Instant::now() < end && !stop.is_set() {
         show(d, &Frame::new(w, h, colors[i % colors.len()]), rot)?;
         i += 1;
     }
     Ok(())
 }
 
-fn sleep_unless_stopped(total: Duration, stop: &AtomicBool) {
-    let step = Duration::from_millis(100);
-    let end = Instant::now() + total;
-    while !stop.load(Ordering::Relaxed) {
-        let now = Instant::now();
-        if now >= end {
-            break;
+/// Stop request from SIGTERM/SIGINT. Besides setting a flag, the signal
+/// handler writes to a socket pair, so sleeps wait on that socket and wake
+/// at once on a signal instead of polling the flag.
+struct Stop {
+    flag: Arc<AtomicBool>,
+    wake: std::os::unix::net::UnixStream,
+}
+
+impl Stop {
+    fn install() -> Result<Self> {
+        let flag = Arc::new(AtomicBool::new(false));
+        let (wake, notify) = std::os::unix::net::UnixStream::pair().context("creating signal pipe")?;
+        for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+            signal_hook::flag::register(sig, Arc::clone(&flag)).context("installing signal handler")?;
+            signal_hook::low_level::pipe::register(sig, notify.try_clone()?)
+                .context("installing signal handler")?;
         }
-        std::thread::sleep(step.min(end - now));
+        Ok(Stop { flag, wake })
+    }
+
+    fn is_set(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+
+    /// Sleep for `total`, returning early when a stop signal arrives.
+    fn sleep(&self, total: Duration) {
+        use std::os::fd::AsRawFd;
+        let end = Instant::now() + total;
+        while !self.is_set() {
+            let now = Instant::now();
+            if now >= end {
+                break;
+            }
+            // Round up so a sub-millisecond remainder doesn't spin.
+            let ms = (end - now).as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+            let mut pfd = libc::pollfd {
+                fd: self.wake.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // EINTR or a wake-up just loops and re-checks the flag.
+            unsafe { libc::poll(&mut pfd, 1, ms) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_sleep_wakes_on_signal_and_times_out_otherwise() {
+        let stop = Stop::install().unwrap();
+        let t = Instant::now();
+        stop.sleep(Duration::from_millis(50));
+        assert!(t.elapsed() >= Duration::from_millis(50) && !stop.is_set());
+
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(100));
+            unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
+        });
+        let t = Instant::now();
+        stop.sleep(Duration::from_secs(10));
+        assert!(stop.is_set());
+        assert!(t.elapsed() < Duration::from_secs(2), "woke after {:?}", t.elapsed());
     }
 }
