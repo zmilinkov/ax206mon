@@ -70,25 +70,37 @@ impl Frame {
     /// Convert to the panel's wire format: RGB565 big-endian, rotated so
     /// the logical canvas appears upright on the physical panel.
     pub fn to_panel_rgb565(&self, rot: Rotation, panel_w: u32, panel_h: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.to_panel_rgb565_into(rot, panel_w, panel_h, &mut out);
+        out
+    }
+
+    /// Like [`Frame::to_panel_rgb565`], reusing `out`'s allocation.
+    pub fn to_panel_rgb565_into(&self, rot: Rotation, panel_w: u32, panel_h: u32, out: &mut Vec<u8>) {
         let (cw, ch) = rot.canvas_size(panel_w, panel_h);
         assert_eq!(
             (cw, ch),
             (self.width, self.height),
             "frame size doesn't match panel"
         );
-        let mut out = Vec::with_capacity((panel_w * panel_h * 2) as usize);
-        for py in 0..panel_h {
-            for px in 0..panel_w {
-                let (lx, ly) = match rot {
-                    Rotation::R0 => (px, py),
-                    Rotation::R90 => (py, panel_w - 1 - px),
-                    Rotation::R180 => (panel_w - 1 - px, panel_h - 1 - py),
-                    Rotation::R270 => (panel_h - 1 - py, px),
-                };
-                out.extend_from_slice(&rgb565_be(self.get(lx, ly)));
+        let (pw, ph, cw) = (panel_w as isize, panel_h as isize, cw as isize);
+        // Canvas pixel index of panel pixel (0, 0), and how it moves per step
+        // along a panel row (dx) and down a panel column (dy).
+        let (base, dx, dy) = match rot {
+            Rotation::R0 => (0, 1, cw),
+            Rotation::R90 => ((pw - 1) * cw, -cw, 1),
+            Rotation::R180 => ((ph - 1) * cw + pw - 1, -1, -cw),
+            Rotation::R270 => (cw - 1, cw, -1),
+        };
+        out.clear();
+        out.resize((panel_w * panel_h * 2) as usize, 0);
+        for (py, row) in out.chunks_exact_mut(2 * pw as usize).enumerate() {
+            let mut i = base + py as isize * dy;
+            for px in row.chunks_exact_mut(2) {
+                px.copy_from_slice(&rgb565_be(self.pixels[i as usize]));
+                i += dx;
             }
         }
-        out
     }
 
     pub fn to_rgb_image(&self) -> image::RgbImage {
@@ -150,6 +162,34 @@ mod tests {
         let top_right = 2 * 2;
         assert_eq!(&out[top_right..top_right + 2], &[0xf8, 0x00]);
         assert_eq!(out.iter().filter(|&&b| b == 0xf8).count(), 1);
+    }
+
+    #[test]
+    fn rotation_matches_reference_mapping() {
+        // Every rotation against the straightforward per-pixel mapping.
+        let (pw, ph) = (5u32, 3u32);
+        for rot in [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270] {
+            let (cw, ch) = rot.canvas_size(pw, ph);
+            let mut f = Frame::new(cw, ch, Rgb888::BLACK);
+            for y in 0..ch {
+                for x in 0..cw {
+                    f.set(x, y, Rgb888::new((x * 40) as u8, (y * 60) as u8, 7));
+                }
+            }
+            let mut want = Vec::new();
+            for py in 0..ph {
+                for px in 0..pw {
+                    let (lx, ly) = match rot {
+                        Rotation::R0 => (px, py),
+                        Rotation::R90 => (py, pw - 1 - px),
+                        Rotation::R180 => (pw - 1 - px, ph - 1 - py),
+                        Rotation::R270 => (ph - 1 - py, px),
+                    };
+                    want.extend_from_slice(&rgb565_be(f.get(lx, ly)));
+                }
+            }
+            assert_eq!(f.to_panel_rgb565(rot, pw, ph), want, "{rot:?}");
+        }
     }
 
     #[test]
