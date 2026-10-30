@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           ax206mon
-Version:        0.2.0
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        Status dashboard for AX206-protocol USB mini displays
 # The binary embeds Noto Sans Mono (SIL OFL 1.1), see assets/fonts.
@@ -74,6 +74,15 @@ udevadm trigger --subsystem-match=usb --attr-match=idVendor=1908 >/dev/null 2>&1
 %config(noreplace) %{_sysconfdir}/%{name}/%{name}.conf
 
 %changelog
+* Thu Oct 29 2026 Zeljko Milinkov <zeljko.milinkov@gmail.com> - 0.3.0-1
+- Pages: services, network interfaces and compose stacks, with per-widget options
+- Busy schedule: page 1 alternates with the other pages under CPU/GPU load
+- Screen protection: night backlight, header variation, idle refresh
+- Anti-aliased Noto Sans Mono text (OFL) with font_scale; compact header
+- GPU: Radeon and Intel (i915) load, compute/blitter/video rows and temperature
+- RAM split into apps/system/cache with a swap bar; thin CPU/GPU temperature bars
+- Warn when the default config file is missing and log the busy settings
+
 * Sat Oct 17 2026 Zeljko Milinkov <zeljko.milinkov@gmail.com> - 0.2.0-1
 - Config file moved to /etc/ax206mon/ax206mon.conf with [global] and [[page]] tables
 - Multiple pages that rotate; portrait by default

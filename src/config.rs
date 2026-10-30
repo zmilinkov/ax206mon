@@ -483,6 +483,25 @@ mod tests {
     }
 
     #[test]
+    fn spec_version_matches_cargo_and_changelog() {
+        let spec = include_str!("../packaging/ax206mon.spec");
+        let version = env!("CARGO_PKG_VERSION");
+        let spec_version = spec
+            .lines()
+            .find_map(|l| l.strip_prefix("Version:"))
+            .map(str::trim)
+            .expect("spec has a Version line");
+        assert_eq!(spec_version, version, "bump packaging/ax206mon.spec with Cargo.toml");
+        // The newest changelog entry (first line after %changelog) names it.
+        let newest = spec
+            .lines()
+            .skip_while(|l| !l.starts_with("%changelog"))
+            .nth(1)
+            .expect("changelog entry");
+        assert!(newest.contains(&format!("- {version}-")), "add a changelog entry for {version}: {newest}");
+    }
+
+    #[test]
     fn rejects_bad_rotation() {
         let c: Config = toml::from_str("[global]\nrotate = 45").unwrap();
         assert!(c.validate().is_err());
