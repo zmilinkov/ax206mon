@@ -218,6 +218,8 @@ fn stats_opts(cfg: &Config) -> stats::Options {
         docker_socket: g.docker_socket.clone(),
         net_iface: Some(g.net_interface.clone()).filter(|s| !s.is_empty()),
         temp_file: Some(PathBuf::from(&g.temp_file)).filter(|p| !p.as_os_str().is_empty()),
+        services_cache: Duration::from_secs_f64(g.services_cache_seconds),
+        docker_cache: Duration::from_secs_f64(g.docker_cache_seconds),
     }
 }
 

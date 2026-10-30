@@ -78,6 +78,8 @@ udevadm trigger --subsystem-match=usb --attr-match=idVendor=1908 >/dev/null 2>&1
 - Don't resend a frame identical to the one already on the display
 - Faster frame conversion, reusing its buffer instead of allocating per frame
 - Sleep on a signal pipe instead of waking every 100 ms to check for stop
+- Cache the systemctl service list and docker status (docker_cache_seconds,
+  services_cache_seconds, default 10, 0 = off)
 
 * Thu Oct 29 2026 Zeljko Milinkov <zeljko.milinkov@gmail.com> - 0.3.0-1
 - Pages: services, network interfaces and compose stacks, with per-widget options

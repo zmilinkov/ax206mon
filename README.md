@@ -29,6 +29,10 @@ The display cycles through the pages defined in
   containers each). A `docker_status` widget (daemon state, container counts)
   is available too.
 
+The service list and docker status are reused for `services_cache_seconds` /
+`docker_cache_seconds` (default 10, `0` = fetch every refresh) to avoid running
+`systemctl` and querying the engine on every refresh.
+
 Default orientation is portrait (`rotate = 270`); set `rotate` in `[global]` to
 0, 90, 180 or 270. The layout adapts: portrait uses stacked bars with legends,
 landscape uses one-line bars and a side-by-side header.
